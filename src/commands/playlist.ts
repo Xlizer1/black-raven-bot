@@ -401,7 +401,13 @@ export class PlaylistCommand extends Command {
   private shuffleArray<T>(array: T[]): void {
     for (let i = array.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
-      [array[i], array[j]] = [array[j], array[i]];
+      const temp = array[i];
+      const other = array[j];
+
+      if (temp !== undefined && other !== undefined) {
+        array[i] = other;
+        array[j] = temp;
+      }
     }
   }
 
