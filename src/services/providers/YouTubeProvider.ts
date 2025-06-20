@@ -65,12 +65,16 @@ export class YouTubeProvider implements IMusicProvider {
     try {
       const sanitizedQuery = query.replace(/[;&|`$(){}[\]\\]/g, "");
 
-      // Ultra-lightweight command for autocomplete - only get title, id, uploader
-      const searchCommand = `yt-dlp "ytsearch${limit}:${sanitizedQuery}" --print "%(id)s|%(title)s|%(uploader)s|%(duration)s|%(webpage_url)s" --no-playlist --no-download --skip-download --ignore-errors --quiet --no-warnings`;
+      // Ultra-lightweight command for autocomplete - only get essential data
+      const searchCommand = `yt-dlp "ytsearch${Math.min(
+        limit,
+        6
+      )}:${sanitizedQuery}" --print "%(id)s|%(title)s|%(uploader)s|%(duration)s|%(webpage_url)s" --no-playlist --no-download --skip-download --ignore-errors --quiet --no-warnings --no-check-certificates`;
 
       const { stdout } = await execAsync(searchCommand, {
-        timeout: 5000, // 5 second timeout for autocomplete
-        maxBuffer: 1024 * 512, // 512KB buffer limit
+        timeout: 2000, // Reduced to 2 seconds for autocomplete
+        maxBuffer: 1024 * 256, // Reduced to 256KB buffer limit
+        killSignal: "SIGKILL", // Use SIGKILL instead of SIGTERM
       });
 
       const lines = stdout.trim().split("\n");
@@ -106,6 +110,18 @@ export class YouTubeProvider implements IMusicProvider {
 
       return results;
     } catch (error) {
+      // Handle timeout errors gracefully
+      if (error && typeof error === "object") {
+        const execError = error as any;
+        if (
+          execError.killed ||
+          execError.signal === "SIGTERM" ||
+          execError.signal === "SIGKILL"
+        ) {
+          console.warn("YouTube autocomplete search timed out:", query);
+          return [];
+        }
+      }
       console.error("YouTube autocomplete search error:", error);
       return [];
     }
