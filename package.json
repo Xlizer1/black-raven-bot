@@ -14,10 +14,13 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@discordjs/voice": "^0.18.0",
     "@sapphire/framework": "^5.3.6",
     "discord.js": "^14.20.0",
     "dotenv": "^16.5.0",
     "ffmpeg": "^0.0.4",
-    "play-dl": "^1.9.7"
+    "play-dl": "^1.9.7",
+    "ytdl-core": "^4.11.5",
+    "ytsr": "^3.8.4"
   }
 }
