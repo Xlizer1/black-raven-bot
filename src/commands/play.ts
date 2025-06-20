@@ -49,7 +49,7 @@ export class PlayCommand extends Command {
     );
   }
 
-  // Autocomplete handler
+  // Enhanced Autocomplete handler
   public override async autocompleteRun(
     interaction: Command.AutocompleteInteraction
   ) {
@@ -64,66 +64,212 @@ export class PlayCommand extends Command {
       const query = focusedOption.value as string;
 
       // Don't search if query is too short or empty
-      if (!query || query.length < 2) {
+      if (!query || query.trim().length < 2) {
         return interaction.respond([]);
       }
+
+      const trimmedQuery = query.trim();
 
       // If it's already a URL, don't provide autocomplete
-      if (MusicService.isUrl(query)) {
-        return interaction.respond([]);
+      if (this.isValidUrl(trimmedQuery)) {
+        return interaction.respond([
+          {
+            name: `🔗 ${
+              trimmedQuery.length > 80
+                ? trimmedQuery.substring(0, 77) + "..."
+                : trimmedQuery
+            }`,
+            value: trimmedQuery,
+          },
+        ]);
       }
 
-      // Get platform preference from user's current input
+      // Get platform preference
       const platformChoice = interaction.options.getString(
         "platform"
       ) as MusicPlatform;
       const targetPlatform = platformChoice || MusicPlatform.YOUTUBE;
 
-      logger.debug(`Autocomplete search: "${query}" on ${targetPlatform}`);
-
-      // Use fast autocomplete search with timeout protection
-      const searchPromise = MusicService.searchForAutocomplete(
-        query,
-        targetPlatform,
-        8
+      // Create a defensive search with multiple fallbacks
+      const searchResults = await this.performDefensiveAutocompleteSearch(
+        trimmedQuery,
+        targetPlatform
       );
-      const timeoutPromise = new Promise<VideoInfo[]>(
-        (resolve) => setTimeout(() => resolve([]), 2500) // 2.5 second timeout
-      );
-
-      const searchResults = await Promise.race([searchPromise, timeoutPromise]);
 
       // Convert results to autocomplete choices
-      const choices = searchResults.slice(0, 8).map((result) => {
-        // Create display name with artist if available
-        let displayName = result.title;
-        if (result.artist && result.artist !== result.title) {
-          displayName = `${result.artist} - ${result.title}`;
-        }
+      const choices = this.formatAutocompleteChoices(
+        searchResults,
+        trimmedQuery
+      );
 
-        // Ensure the choice doesn't exceed Discord's limits
-        if (displayName.length > 95) {
-          displayName = displayName.substring(0, 92) + "...";
-        }
-
-        // Use URL as value for exact matching, fallback to title
-        const value = (result.url || result.title).substring(0, 100);
-
-        return {
-          name: displayName,
-          value: value,
-        };
-      });
-
+      // Always respond, even if empty
       await interaction.respond(choices);
     } catch (error) {
-      logger.error("Autocomplete search error:", error);
-      // Always respond to avoid Discord errors, even if empty
+      console.error("Autocomplete error:", error);
+      // Emergency fallback - always respond to prevent Discord errors
       try {
-        await interaction.respond([]);
+        await interaction.respond([
+          {
+            name: "🔍 Search on YouTube...",
+            value: interaction.options.getFocused() || "search",
+          },
+        ]);
       } catch (responseError) {
-        logger.error("Failed to respond to autocomplete:", responseError);
+        console.error("Failed emergency autocomplete response:", responseError);
       }
+    }
+  }
+
+  private async performDefensiveAutocompleteSearch(
+    query: string,
+    platform: MusicPlatform
+  ): Promise<VideoInfo[]> {
+    try {
+      // Primary search attempt
+      const results = await Promise.race([
+        MusicService.searchForAutocomplete(query, platform, 6),
+        new Promise<VideoInfo[]>(
+          (resolve) => setTimeout(() => resolve([]), 1200) // 1.2s timeout
+        ),
+      ]);
+
+      return results || [];
+    } catch (error) {
+      console.warn(`Primary autocomplete search failed for "${query}":`, error);
+      return [];
+    }
+  }
+
+  private formatAutocompleteChoices(
+    results: VideoInfo[],
+    originalQuery: string
+  ): Array<{ name: string; value: string }> {
+    const choices: Array<{ name: string; value: string }> = [];
+
+    // Process results
+    for (const result of results.slice(0, 20)) {
+      try {
+        // Handle suggestion-based results differently
+        if (result.url.startsWith("search:")) {
+          // This is a suggestion, format it nicely
+          let displayName = result.title;
+
+          // Add artist if available
+          if (result.artist) {
+            displayName = `${result.artist} - ${displayName}`;
+          }
+
+          // Add search icon for suggestions
+          displayName = `🔍 ${displayName}`;
+
+          // Ensure proper length
+          if (displayName.length > 95) {
+            displayName = displayName.substring(0, 92) + "...";
+          }
+
+          choices.push({
+            name: displayName,
+            value: result.url, // This will be "search:query"
+          });
+        } else {
+          // This is a real video result, format normally
+          let displayName = result.title || "Unknown";
+
+          // Add artist if available and different from title
+          if (
+            result.artist &&
+            result.artist !== result.title &&
+            result.artist.length < 40 &&
+            !displayName.toLowerCase().includes(result.artist.toLowerCase())
+          ) {
+            displayName = `${result.artist} - ${displayName}`;
+          }
+
+          // Add platform emoji
+          const platformEmoji = this.getPlatformEmoji(result.platform);
+          displayName = `${platformEmoji} ${displayName}`;
+
+          // Add duration if available and reasonable
+          if (
+            result.duration &&
+            result.duration > 0 &&
+            result.duration < 7200
+          ) {
+            const duration = this.formatDuration(result.duration);
+            displayName = `${displayName} (${duration})`;
+          }
+
+          // Ensure proper length
+          if (displayName.length > 95) {
+            displayName = displayName.substring(0, 92) + "...";
+          }
+
+          // Use title as value
+          let value = result.title || originalQuery;
+          if (value.length > 100) {
+            value = value.substring(0, 100);
+          }
+
+          choices.push({
+            name: displayName,
+            value: value,
+          });
+        }
+      } catch (error) {
+        console.warn("Error formatting autocomplete choice:", error);
+        continue;
+      }
+    }
+
+    // If no results found, provide helpful options
+    if (choices.length === 0) {
+      const truncatedQuery =
+        originalQuery.length > 50
+          ? originalQuery.substring(0, 47) + "..."
+          : originalQuery;
+
+      choices.push({
+        name: `🔍 Search for "${truncatedQuery}"`,
+        value: originalQuery,
+      });
+    }
+
+    return choices.slice(0, 25); // Discord's maximum
+  }
+
+  private isValidUrl(input: string): boolean {
+    try {
+      const url = new URL(input);
+      return url.protocol === "http:" || url.protocol === "https:";
+    } catch {
+      return false;
+    }
+  }
+
+  private formatDuration(seconds: number): string {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+
+    if (minutes >= 60) {
+      const hours = Math.floor(minutes / 60);
+      const remainingMinutes = minutes % 60;
+      return `${hours}:${remainingMinutes
+        .toString()
+        .padStart(2, "0")}:${remainingSeconds.toString().padStart(2, "0")}`;
+    }
+    return `${minutes}:${remainingSeconds.toString().padStart(2, "0")}`;
+  }
+
+  private getPlatformEmoji(platform: string): string {
+    switch (platform.toLowerCase()) {
+      case "youtube":
+        return "📺";
+      case "spotify":
+        return "🟢";
+      case "soundcloud":
+        return "🟠";
+      default:
+        return "🎵";
     }
   }
 
@@ -148,7 +294,7 @@ export class PlayCommand extends Command {
       });
     }
 
-    const query = interaction.options.getString("query", true);
+    let query = interaction.options.getString("query", true);
     const platformChoice = interaction.options.getString(
       "platform"
     ) as MusicPlatform;
@@ -157,6 +303,12 @@ export class PlayCommand extends Command {
 
     try {
       const queue = MusicQueue.getQueue(interaction.guild.id);
+
+      // Handle suggestion-based queries (from autocomplete)
+      if (query.startsWith("search:")) {
+        query = query.replace("search:", "");
+        logger.info(`Processing suggestion-based search: ${query}`);
+      }
 
       // Detect platform or use user choice
       const detectedPlatform = MusicService.detectPlatform(query);
@@ -167,9 +319,10 @@ export class PlayCommand extends Command {
 
       // Get track info
       let trackInfo;
-      if (MusicService.isUrl(query)) {
+      if (MusicService.isUrl(query) && !query.startsWith("search:")) {
         trackInfo = await MusicService.getTrackInfo(query);
       } else {
+        // For suggestions or regular text queries, do a proper search
         const searchResults = await MusicService.search(query, targetPlatform, {
           limit: 1,
         });
@@ -177,7 +330,9 @@ export class PlayCommand extends Command {
       }
 
       if (!trackInfo) {
-        return interaction.editReply("❌ Couldn't find that song!");
+        return interaction.editReply(
+          `❌ Couldn't find "${query}"! Try a different search term.`
+        );
       }
 
       // Add to queue
@@ -192,8 +347,18 @@ export class PlayCommand extends Command {
       } else {
         // Just notify about queue addition
         const position = queue.size();
+        const platformEmoji = this.getPlatformEmoji(trackInfo.platform);
+        const duration = trackInfo.duration
+          ? ` (${this.formatDuration(trackInfo.duration)})`
+          : "";
+
         return interaction.editReply({
-          content: `➕ Added to queue: **${trackInfo.title}**\n📍 Position: ${position}\n🎵 Platform: ${trackInfo.platform}`,
+          content:
+            `➕ **Added to queue:**\n` +
+            `${platformEmoji} **${trackInfo.title}**${duration}\n` +
+            `📍 Position: ${position}\n` +
+            `🎵 Platform: ${trackInfo.platform}\n` +
+            `👤 Requested by: <@${interaction.user.id}>`,
         });
       }
     } catch (error) {
@@ -272,28 +437,23 @@ export class PlayCommand extends Command {
 
       const platformEmoji = this.getPlatformEmoji(currentSong.platform);
       const duration = currentSong.duration
-        ? ` (${MusicService.formatDuration(currentSong.duration)})`
+        ? ` (${this.formatDuration(currentSong.duration)})`
         : "";
 
       return interaction.editReply({
-        content: `${platformEmoji} Now playing: **${currentSong.title}**${duration}\n👤 Requested by: <@${currentSong.requestedBy}>`,
+        content:
+          `${platformEmoji} **Now playing:**\n` +
+          `🎵 **${currentSong.title}**${duration}\n` +
+          `👤 Requested by: <@${currentSong.requestedBy}>` +
+          (queue.size() > 0
+            ? `\n📋 ${queue.size()} song${
+                queue.size() === 1 ? "" : "s"
+              } in queue`
+            : ""),
       });
     } catch (error) {
       logger.error("Playback error:", error);
       return this.playNext(queue, voiceChannel, interaction);
-    }
-  }
-
-  private getPlatformEmoji(platform: MusicPlatform): string {
-    switch (platform) {
-      case MusicPlatform.YOUTUBE:
-        return "📺";
-      case MusicPlatform.SPOTIFY:
-        return "🟢";
-      case MusicPlatform.SOUNDCLOUD:
-        return "🟠";
-      default:
-        return "🎵";
     }
   }
 }

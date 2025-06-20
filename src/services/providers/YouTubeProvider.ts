@@ -59,67 +59,223 @@ export class YouTubeProvider implements IMusicProvider {
 
   async searchForAutocomplete(
     query: string,
-    limit: number = 6
+    limit: number = 8
+  ): Promise<VideoInfo[]> {
+    try {
+      // Use YouTube's ultra-fast suggestions API
+      const suggestionsUrl = `https://suggestqueries.google.com/complete/search?client=youtube&q=${encodeURIComponent(
+        query
+      )}`;
+
+      const response = await fetch(suggestionsUrl, {
+        signal: AbortSignal.timeout(500), // Very fast timeout
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        },
+      });
+
+      if (!response.ok) {
+        return this.createQuerySuggestions(query, limit);
+      }
+
+      const text = await response.text();
+
+      // Parse JSONP response: window.google.ac.h(["query",[suggestions...]])
+      const jsonMatch = text.match(/\[.*\]/);
+      if (!jsonMatch) {
+        return this.createQuerySuggestions(query, limit);
+      }
+
+      const data = JSON.parse(jsonMatch[0]);
+      const suggestions: string[] = data[1] || [];
+
+      if (suggestions.length === 0) {
+        return this.createQuerySuggestions(query, limit);
+      }
+
+      // Filter and enhance suggestions for music
+      const musicSuggestions = this.filterMusicSuggestions(suggestions, query);
+
+      // Convert to VideoInfo objects
+      const results: VideoInfo[] = musicSuggestions
+        .slice(0, limit)
+        .map((suggestion: string, index: number) => ({
+          id: `yt_suggestion_${Date.now()}_${index}`,
+          title: this.enhanceSuggestionTitle(suggestion),
+          url: `search:${suggestion}`, // Special marker for suggestions
+          duration: undefined,
+          thumbnail: undefined,
+          platform: this.platform,
+          artist: this.extractArtistFromSuggestion(suggestion),
+          album: undefined,
+        }));
+
+      return results;
+    } catch (error) {
+      console.warn(`YouTube suggestions failed for "${query}":`, error);
+      return this.createQuerySuggestions(query, limit);
+    }
+  }
+
+  private filterMusicSuggestions(
+    suggestions: string[],
+    originalQuery: string
+  ): string[] {
+    const filtered = suggestions.filter((suggestion) => {
+      const lower = suggestion.toLowerCase();
+      // Prefer music-related suggestions
+      return (
+        lower.includes("song") ||
+        lower.includes("music") ||
+        lower.includes("lyrics") ||
+        lower.includes("acoustic") ||
+        lower.includes("cover") ||
+        lower.includes("remix") ||
+        lower.includes("live") ||
+        lower.includes("official") ||
+        // Or if it's close to the original query
+        lower.includes(originalQuery.toLowerCase().substring(0, 3))
+      );
+    });
+
+    // If we filtered too much, include the best original suggestions
+    if (filtered.length < 3) {
+      const remaining = suggestions
+        .filter((s) => !filtered.includes(s))
+        .slice(0, 5 - filtered.length);
+      filtered.push(...remaining);
+    }
+
+    return filtered;
+  }
+
+  private enhanceSuggestionTitle(suggestion: string): string {
+    // Clean up and enhance the suggestion for music context
+    return suggestion.replace(/\s+/g, " ").trim().substring(0, 100); // Keep reasonable length
+  }
+
+  private extractArtistFromSuggestion(suggestion: string): string | undefined {
+    // Try to extract artist name from suggestion patterns
+    const patterns = [
+      /^([^-]+)\s*-\s*/, // "Artist - Song"
+      /^([^(]+)\s*\(/, // "Artist (something)"
+      /by\s+([^(]+)/, // "Song by Artist"
+    ];
+
+    for (const pattern of patterns) {
+      const match = suggestion.match(pattern);
+      if (match && match[1]) {
+        const artist = match[1].trim();
+        if (artist.length > 2 && artist.length < 50) {
+          return artist;
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  private createQuerySuggestions(query: string, limit: number): VideoInfo[] {
+    // Fallback: create smart suggestions based on the query
+    const suggestions = [
+      query,
+      `${query} official`,
+      `${query} lyrics`,
+      `${query} acoustic`,
+      `${query} live`,
+    ];
+
+    return suggestions.slice(0, limit).map((suggestion, index) => ({
+      id: `query_suggestion_${Date.now()}_${index}`,
+      title: suggestion,
+      url: `search:${suggestion}`,
+      duration: undefined,
+      thumbnail: undefined,
+      platform: this.platform,
+      artist: undefined,
+      album: undefined,
+    }));
+  }
+
+  private async fallbackSearch(
+    query: string,
+    limit: number
   ): Promise<VideoInfo[]> {
     try {
       const sanitizedQuery = query.replace(/[;&|`$(){}[\]\\]/g, "");
 
-      // Simple command for autocomplete
-      const searchCommand = `yt-dlp "ytsearch${limit}:${sanitizedQuery}" --print "%(id)s|%(title)s|%(uploader)s|%(duration)s|%(webpage_url)s" --no-download --skip-download --ignore-errors --no-warnings --extractor-retries 2`;
+      // Ultra-fast yt-dlp command as last resort
+      const searchCommand = `yt-dlp "ytsearch${Math.min(
+        limit,
+        3
+      )}:${sanitizedQuery}" --print "%(id)s|%(title)s" --no-download --skip-download --ignore-errors --no-warnings --extractor-retries 1`;
 
       const { stdout } = await execAsync(searchCommand, {
-        timeout: 3000,
-        maxBuffer: 1024 * 512,
+        timeout: 1000, // 1 second max
+        maxBuffer: 1024 * 64,
         killSignal: "SIGKILL",
       });
 
-      const lines = stdout.trim().split("\n");
+      if (!stdout?.trim()) return [];
+
       const results: VideoInfo[] = [];
+      const lines = stdout.trim().split("\n");
 
-      for (const line of lines) {
-        if (line.trim()) {
-          const parts = line.split("|");
-          if (parts.length >= 5 && parts[0] && parts[1] && parts[4]) {
-            const id = parts[0] || "unknown";
-            const title = parts[1] || "Unknown";
-            const url = parts[4] || "";
-            const durationStr = parts[3];
-            const artist = parts[2];
-
-            if (id && title && url) {
-              results.push({
-                id,
-                title,
-                url,
-                duration: durationStr
-                  ? this.parseDurationFromSeconds(durationStr)
-                  : undefined,
-                thumbnail: undefined,
-                platform: this.platform,
-                artist: artist || undefined,
-                album: undefined,
-              });
-            }
+      for (const line of lines.slice(0, limit)) {
+        if (line.includes("|")) {
+          const [id, title] = line.split("|");
+          if (id?.trim() && title?.trim()) {
+            results.push({
+              id: id.trim(),
+              title: title.trim(),
+              url: `https://www.youtube.com/watch?v=${id.trim()}`,
+              duration: undefined,
+              thumbnail: undefined,
+              platform: this.platform,
+              artist: undefined,
+              album: undefined,
+            });
           }
         }
       }
 
       return results;
     } catch (error) {
-      if (error && typeof error === "object") {
-        const execError = error as any;
-        if (
-          execError.killed ||
-          execError.signal === "SIGTERM" ||
-          execError.signal === "SIGKILL"
-        ) {
-          console.warn("YouTube autocomplete search timed out:", query);
-          return [];
-        }
-      }
-      console.error("YouTube autocomplete search error:", error);
+      console.warn(`Fallback search failed for "${query}":`, error);
       return [];
     }
+  }
+
+  private cleanTitle(title: string): string {
+    // More aggressive cleaning for autocomplete
+    return title
+      .replace(/\s*\(Official.*?\)/gi, "")
+      .replace(/\s*\[Official.*?\]/gi, "")
+      .replace(/\s*-\s*Official.*$/gi, "")
+      .replace(/\s*\|\s*Official.*$/gi, "")
+      .replace(/\s*\(Music Video\)/gi, "")
+      .replace(/\s*\[Music Video\]/gi, "")
+      .replace(/\s*\(Lyric Video\)/gi, "")
+      .replace(/\s*\[Lyric Video\]/gi, "")
+      .replace(/\s*\(Audio\)/gi, "")
+      .replace(/\s*\[Audio\]/gi, "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .substring(0, 80); // Limit length for autocomplete
+  }
+
+  private cleanArtistName(uploader: string): string {
+    // Clean common channel name suffixes
+    return uploader
+      .replace(/\s*-\s*Topic$/gi, "")
+      .replace(/\s*VEVO$/gi, "")
+      .replace(/\s*Official$/gi, "")
+      .replace(/\s*Music$/gi, "")
+      .replace(/\s*Records$/gi, "")
+      .replace(/\s*Entertainment$/gi, "")
+      .trim()
+      .substring(0, 50); // Limit length
   }
 
   async getStreamInfo(url: string): Promise<StreamInfo | null> {

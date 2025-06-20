@@ -29,70 +29,58 @@ export class MusicService {
     const targetPlatform = platform || "youtube";
 
     try {
-      // Check cache first
+      // Check cache first - this is crucial for performance
       const cachedResults = this.cache.get(query, targetPlatform);
       if (cachedResults) {
         return cachedResults.slice(0, limit);
       }
 
-      // For YouTube, use optimized search
-      if (targetPlatform === "youtube") {
-        const youtubeProvider = this.factory.getProvider(
-          "youtube" as MusicPlatform
-        );
-        if (youtubeProvider && youtubeProvider instanceof YouTubeProvider) {
-          const results = await Promise.race([
-            youtubeProvider.searchForAutocomplete(query, limit),
-            new Promise<VideoInfo[]>(
-              (resolve) => setTimeout(() => resolve([]), 1800) // 1.8 second timeout
-            ),
-          ]);
-
-          // Cache successful results
-          if (results.length > 0) {
-            this.cache.set(query, targetPlatform, results);
+      // Create multiple timeout layers for reliability
+      const searchPromise = async (): Promise<VideoInfo[]> => {
+        // For YouTube, use the ultra-fast optimized search
+        if (targetPlatform === "youtube") {
+          const youtubeProvider = this.factory.getProvider(
+            "youtube" as MusicPlatform
+          );
+          if (youtubeProvider && youtubeProvider instanceof YouTubeProvider) {
+            return await youtubeProvider.searchForAutocomplete(query, limit);
           }
-
-          return results;
         }
-      }
-
-      // For Spotify, use optimized search if available
-      if (targetPlatform === "spotify") {
-        const spotifyProvider = this.factory.getProvider(
-          "spotify" as MusicPlatform
-        );
-        if (spotifyProvider && "searchForAutocomplete" in spotifyProvider) {
-          const results = await Promise.race([
-            (spotifyProvider as any).searchForAutocomplete(query, limit),
-            new Promise<VideoInfo[]>(
-              (resolve) => setTimeout(() => resolve([]), 1800) // 1.8 second timeout
-            ),
-          ]);
-
-          // Cache successful results
-          if (results.length > 0) {
-            this.cache.set(query, targetPlatform, results);
+        // For Spotify, use optimized search if available
+        else if (targetPlatform === "spotify") {
+          const spotifyProvider = this.factory.getProvider(
+            "spotify" as MusicPlatform
+          );
+          if (spotifyProvider && "searchForAutocomplete" in spotifyProvider) {
+            return await (spotifyProvider as any).searchForAutocomplete(
+              query,
+              limit
+            );
           }
-
-          return results;
         }
-      }
 
-      // Fallback to regular search with aggressive timeout
-      const results = await Promise.race([
-        this.factory.search(query, platform as MusicPlatform, { limit }),
-        new Promise<VideoInfo[]>(
-          (resolve) => setTimeout(() => resolve([]), 1500) // 1.5 second fallback timeout
-        ),
-      ]);
+        // Fallback - should rarely be reached
+        return await this.factory.search(query, platform as MusicPlatform, {
+          limit: Math.min(limit, 3),
+        });
+      };
 
-      // Cache successful results
+      // Race with timeout
+      const timeoutPromise = new Promise<VideoInfo[]>((resolve) => {
+        setTimeout(() => {
+          console.warn(`Autocomplete search timed out for: "${query}"`);
+          resolve([]);
+        }, 1500); // 1.5 second timeout
+      });
+
+      const results = await Promise.race([searchPromise(), timeoutPromise]);
+
+      // Cache successful results (only if we got some results and no timeout)
       if (results.length > 0) {
         this.cache.set(query, targetPlatform, results);
       }
 
-      return results;
+      return results.slice(0, limit);
     } catch (error) {
       console.error("Autocomplete search error:", error);
       return [];

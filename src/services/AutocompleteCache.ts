@@ -38,15 +38,17 @@ export class AutocompleteCache {
       return null;
     }
 
-    logger.debug(`Cache hit for: ${query} (${platform})`);
-    return entry.results;
+    logger.debug(
+      `Cache hit for: ${query} (${platform}) - ${entry.results.length} results`
+    );
+    return [...entry.results]; // Return a copy to prevent mutation
   }
 
   set(query: string, platform: string, results: VideoInfo[]): void {
     const key = this.createKey(query, platform);
 
-    // Don't cache empty results
-    if (results.length === 0) return;
+    // Don't cache empty results or very short queries
+    if (results.length === 0 || query.trim().length < 2) return;
 
     // Remove oldest entries if cache is full
     if (this.cache.size >= this.MAX_CACHE_SIZE) {
@@ -57,7 +59,7 @@ export class AutocompleteCache {
     }
 
     this.cache.set(key, {
-      results,
+      results: [...results], // Store a copy to prevent mutation
       timestamp: Date.now(),
     });
 
@@ -67,7 +69,15 @@ export class AutocompleteCache {
   }
 
   private createKey(query: string, platform: string): string {
-    return `${platform}:${query.toLowerCase().trim()}`;
+    // Normalize the query for better cache hits
+    const normalizedQuery = query
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, " ") // Normalize whitespace
+      .replace(/[^\w\s-]/g, "") // Remove special characters except hyphens
+      .slice(0, 50); // Limit key length
+
+    return `${platform}:${normalizedQuery}`;
   }
 
   private cleanExpiredEntries(): void {
