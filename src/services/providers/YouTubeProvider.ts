@@ -28,11 +28,11 @@ export class YouTubeProvider implements IMusicProvider {
       const limit = options.limit || 1;
       const sanitizedQuery = query.replace(/[;&|`$(){}[\]\\]/g, "");
 
-      // Use basic search for metadata only
-      const searchCommand = `yt-dlp "ytsearch${limit}:${sanitizedQuery}" --dump-json --no-download --skip-download --ignore-errors --no-warnings`;
+      // Enhanced yt-dlp command with better anti-bot protection
+      const searchCommand = `yt-dlp "ytsearch${limit}:${sanitizedQuery}" --dump-json --no-download --skip-download --ignore-errors --no-warnings --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.google.com/" --extractor-retries 3`;
 
       const { stdout } = await execAsync(searchCommand, {
-        timeout: 15000,
+        timeout: 20000, // Increased timeout
         maxBuffer: 1024 * 1024 * 3,
       });
 
@@ -71,7 +71,10 @@ export class YouTubeProvider implements IMusicProvider {
         signal: AbortSignal.timeout(500), // Very fast timeout
         headers: {
           "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          Accept: "application/json, text/plain, */*",
+          "Accept-Language": "en-US,en;q=0.9",
+          Referer: "https://www.youtube.com/",
         },
       });
 
@@ -88,13 +91,13 @@ export class YouTubeProvider implements IMusicProvider {
       }
 
       const data = JSON.parse(jsonMatch[0]);
-      const suggestions: string[] = data[1] || [];
+      const suggestions: unknown[] = data[1] || [];
 
       if (suggestions.length === 0) {
         return this.createQuerySuggestions(query, limit);
       }
 
-      // Filter and enhance suggestions for music
+      // Filter and enhance suggestions for music - with proper type checking
       const musicSuggestions = this.filterMusicSuggestions(suggestions, query);
 
       // Convert to VideoInfo objects
@@ -119,10 +122,16 @@ export class YouTubeProvider implements IMusicProvider {
   }
 
   private filterMusicSuggestions(
-    suggestions: string[],
+    suggestions: unknown[],
     originalQuery: string
   ): string[] {
-    const filtered = suggestions.filter((suggestion) => {
+    // First filter to ensure we only have strings
+    const stringSuggestions = suggestions.filter(
+      (suggestion): suggestion is string =>
+        typeof suggestion === "string" && suggestion.length > 0
+    );
+
+    const filtered = stringSuggestions.filter((suggestion) => {
       const lower = suggestion.toLowerCase();
       // Prefer music-related suggestions
       return (
@@ -141,7 +150,7 @@ export class YouTubeProvider implements IMusicProvider {
 
     // If we filtered too much, include the best original suggestions
     if (filtered.length < 3) {
-      const remaining = suggestions
+      const remaining = stringSuggestions
         .filter((s) => !filtered.includes(s))
         .slice(0, 5 - filtered.length);
       filtered.push(...remaining);
@@ -198,95 +207,15 @@ export class YouTubeProvider implements IMusicProvider {
     }));
   }
 
-  private async fallbackSearch(
-    query: string,
-    limit: number
-  ): Promise<VideoInfo[]> {
-    try {
-      const sanitizedQuery = query.replace(/[;&|`$(){}[\]\\]/g, "");
-
-      // Ultra-fast yt-dlp command as last resort
-      const searchCommand = `yt-dlp "ytsearch${Math.min(
-        limit,
-        3
-      )}:${sanitizedQuery}" --print "%(id)s|%(title)s" --no-download --skip-download --ignore-errors --no-warnings --extractor-retries 1`;
-
-      const { stdout } = await execAsync(searchCommand, {
-        timeout: 1000, // 1 second max
-        maxBuffer: 1024 * 64,
-        killSignal: "SIGKILL",
-      });
-
-      if (!stdout?.trim()) return [];
-
-      const results: VideoInfo[] = [];
-      const lines = stdout.trim().split("\n");
-
-      for (const line of lines.slice(0, limit)) {
-        if (line.includes("|")) {
-          const [id, title] = line.split("|");
-          if (id?.trim() && title?.trim()) {
-            results.push({
-              id: id.trim(),
-              title: title.trim(),
-              url: `https://www.youtube.com/watch?v=${id.trim()}`,
-              duration: undefined,
-              thumbnail: undefined,
-              platform: this.platform,
-              artist: undefined,
-              album: undefined,
-            });
-          }
-        }
-      }
-
-      return results;
-    } catch (error) {
-      console.warn(`Fallback search failed for "${query}":`, error);
-      return [];
-    }
-  }
-
-  private cleanTitle(title: string): string {
-    // More aggressive cleaning for autocomplete
-    return title
-      .replace(/\s*\(Official.*?\)/gi, "")
-      .replace(/\s*\[Official.*?\]/gi, "")
-      .replace(/\s*-\s*Official.*$/gi, "")
-      .replace(/\s*\|\s*Official.*$/gi, "")
-      .replace(/\s*\(Music Video\)/gi, "")
-      .replace(/\s*\[Music Video\]/gi, "")
-      .replace(/\s*\(Lyric Video\)/gi, "")
-      .replace(/\s*\[Lyric Video\]/gi, "")
-      .replace(/\s*\(Audio\)/gi, "")
-      .replace(/\s*\[Audio\]/gi, "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .substring(0, 80); // Limit length for autocomplete
-  }
-
-  private cleanArtistName(uploader: string): string {
-    // Clean common channel name suffixes
-    return uploader
-      .replace(/\s*-\s*Topic$/gi, "")
-      .replace(/\s*VEVO$/gi, "")
-      .replace(/\s*Official$/gi, "")
-      .replace(/\s*Music$/gi, "")
-      .replace(/\s*Records$/gi, "")
-      .replace(/\s*Entertainment$/gi, "")
-      .trim()
-      .substring(0, 50); // Limit length
-  }
-
   async getStreamInfo(url: string): Promise<StreamInfo | null> {
     // First, get basic track info (this usually works even when streaming fails)
     let title = "Unknown";
     let duration: number | undefined;
 
     try {
-      const infoCommand = `yt-dlp "${url}" --get-title --get-duration --no-warnings`;
+      const infoCommand = `yt-dlp "${url}" --get-title --get-duration --no-warnings --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.google.com/"`;
       const { stdout: infoOutput } = await execAsync(infoCommand, {
-        timeout: 10000,
+        timeout: 15000,
       });
       const infoLines = infoOutput.trim().split("\n");
       if (infoLines.length >= 2) {
@@ -297,24 +226,24 @@ export class YouTubeProvider implements IMusicProvider {
       console.warn("Could not get basic info, using defaults");
     }
 
-    // Now try streaming strategies - using EXACT command that worked in your manual test
+    // Enhanced streaming strategies with better anti-bot protection
     const strategies = [
-      // Strategy 1: Your exact working command
+      // Strategy 1: Enhanced with better headers
       {
-        name: "Manual test replica",
-        command: `yt-dlp "${url}" --get-url --format "bestaudio[ext=m4a]/bestaudio/best" --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" --referer "https://www.youtube.com/" --extractor-retries 5 --fragment-retries 5`,
-        timeout: 20000,
-      },
-      // Strategy 2: Alternative format selection
-      {
-        name: "Format fallback",
-        command: `yt-dlp "${url}" --get-url --format "140/251/250/249/bestaudio/worst" --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" --referer "https://www.youtube.com/" --extractor-retries 3 --fragment-retries 3`,
+        name: "Enhanced protection",
+        command: `yt-dlp "${url}" --get-url --format "bestaudio[ext=m4a]/bestaudio/best" --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.google.com/" --extractor-retries 3 --fragment-retries 3 --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" --add-header "Accept-Language:en-US,en;q=0.5" --add-header "Cache-Control:no-cache"`,
         timeout: 25000,
       },
-      // Strategy 3: Ultra-simple approach
+      // Strategy 2: Alternative with different user agent
       {
-        name: "Simple approach",
-        command: `yt-dlp "${url}" --get-url --format "worst" --no-warnings`,
+        name: "Alternative user agent",
+        command: `yt-dlp "${url}" --get-url --format "140/251/250/249/bestaudio/worst" --user-agent "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.youtube.com/" --extractor-retries 2 --fragment-retries 2`,
+        timeout: 20000,
+      },
+      // Strategy 3: Fallback with minimal options
+      {
+        name: "Minimal fallback",
+        command: `yt-dlp "${url}" --get-url --format "bestaudio/worst" --no-warnings --extractor-retries 1`,
         timeout: 15000,
       },
     ];
@@ -345,12 +274,12 @@ export class YouTubeProvider implements IMusicProvider {
         if (error && typeof error === "object") {
           const execError = error as any;
           if (execError.stderr) {
-            if (execError.stderr.includes("403")) {
+            if (execError.stderr.includes("Sign in to confirm")) {
+              console.warn(`   → YouTube bot detection triggered`);
+            } else if (execError.stderr.includes("403")) {
               console.warn(`   → 403 Forbidden error`);
             } else if (execError.stderr.includes("fragment")) {
               console.warn(`   → Fragment download error`);
-            } else if (execError.stderr.includes("Sign in to confirm")) {
-              console.warn(`   → Age-restricted content`);
             }
           }
         }
@@ -371,10 +300,10 @@ export class YouTubeProvider implements IMusicProvider {
 
   async getTrackInfo(url: string): Promise<VideoInfo | null> {
     try {
-      // Try comprehensive info first
-      const command = `yt-dlp "${url}" --dump-json --no-download --skip-download --no-warnings`;
+      // Enhanced command with better anti-bot protection
+      const command = `yt-dlp "${url}" --dump-json --no-download --skip-download --no-warnings --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.google.com/" --extractor-retries 2`;
       const { stdout } = await execAsync(command, {
-        timeout: 15000,
+        timeout: 20000,
       });
       const data = JSON.parse(stdout.trim());
       return this.parseVideoInfo(data);
@@ -383,9 +312,9 @@ export class YouTubeProvider implements IMusicProvider {
 
       // Fallback to basic info (this usually works)
       try {
-        const simpleCommand = `yt-dlp "${url}" --get-title --get-duration --get-id --no-warnings`;
+        const simpleCommand = `yt-dlp "${url}" --get-title --get-duration --get-id --no-warnings --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" --referer "https://www.google.com/"`;
         const { stdout } = await execAsync(simpleCommand, {
-          timeout: 10000,
+          timeout: 15000,
         });
         const lines = stdout.trim().split("\n");
 
@@ -450,11 +379,6 @@ export class YouTubeProvider implements IMusicProvider {
       const duration = parseFloat(durationStr);
       return isNaN(duration) ? undefined : Math.floor(duration);
     }
-  }
-
-  private parseDurationFromSeconds(durationStr: string): number | undefined {
-    const duration = parseFloat(durationStr);
-    return isNaN(duration) ? undefined : Math.floor(duration);
   }
 
   private extractVideoId(url: string): string {
