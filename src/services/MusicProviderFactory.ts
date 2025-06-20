@@ -65,10 +65,6 @@ export class MusicProviderFactory {
     if (platform) {
       const provider = this.getProvider(platform);
       if (provider) {
-        // For Spotify URLs, we might need special handling
-        if (platform === MusicPlatform.SPOTIFY) {
-          return this.handleSpotifyStream(input);
-        }
         return provider.getStreamInfo(input);
       }
     }

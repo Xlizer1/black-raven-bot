@@ -55,6 +55,32 @@ class ConfigManager {
         `Missing required environment variables: ${missing.join(", ")}`
       );
     }
+
+    // Validate Spotify configuration
+    this.validateSpotifyConfig();
+  }
+
+  private validateSpotifyConfig(): void {
+    const hasClientId = !!process.env.SPOTIFY_CLIENT_ID;
+    const hasClientSecret = !!process.env.SPOTIFY_CLIENT_SECRET;
+
+    if (hasClientId && hasClientSecret) {
+      console.log(
+        "✅ Spotify integration configured - Spotify URLs will be supported"
+      );
+    } else if (hasClientId || hasClientSecret) {
+      console.warn(
+        "⚠️  Incomplete Spotify configuration - Both CLIENT_ID and CLIENT_SECRET are required"
+      );
+      console.warn("   Spotify URLs will fall back to YouTube search");
+    } else {
+      console.log(
+        "ℹ️  Spotify integration not configured - Only YouTube will be used"
+      );
+      console.log(
+        "   To enable Spotify: Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET"
+      );
+    }
   }
 }
 
