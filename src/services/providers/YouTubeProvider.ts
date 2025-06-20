@@ -27,9 +27,15 @@ export class YouTubeProvider implements IMusicProvider {
     try {
       const limit = options.limit || 1;
       const sanitizedQuery = query.replace(/[;&|`$(){}[\]\\]/g, "");
-      const searchCommand = `yt-dlp "ytsearch${limit}:${sanitizedQuery}" --dump-json --no-playlist`;
 
-      const { stdout } = await execAsync(searchCommand);
+      // Use a lightweight search command that only gets essential fields
+      const searchCommand = `yt-dlp "ytsearch${limit}:${sanitizedQuery}" --dump-json --no-playlist --no-download --skip-download --ignore-errors --quiet --no-warnings`;
+
+      const { stdout } = await execAsync(searchCommand, {
+        timeout: 10000, // 10 second timeout
+        maxBuffer: 1024 * 1024 * 2, // 2MB buffer limit
+      });
+
       const lines = stdout.trim().split("\n");
 
       const results: VideoInfo[] = [];
@@ -51,10 +57,66 @@ export class YouTubeProvider implements IMusicProvider {
     }
   }
 
+  // Fast search specifically for autocomplete with minimal data
+  async searchForAutocomplete(
+    query: string,
+    limit: number = 10
+  ): Promise<VideoInfo[]> {
+    try {
+      const sanitizedQuery = query.replace(/[;&|`$(){}[\]\\]/g, "");
+
+      // Ultra-lightweight command for autocomplete - only get title, id, uploader
+      const searchCommand = `yt-dlp "ytsearch${limit}:${sanitizedQuery}" --print "%(id)s|%(title)s|%(uploader)s|%(duration)s|%(webpage_url)s" --no-playlist --no-download --skip-download --ignore-errors --quiet --no-warnings`;
+
+      const { stdout } = await execAsync(searchCommand, {
+        timeout: 5000, // 5 second timeout for autocomplete
+        maxBuffer: 1024 * 512, // 512KB buffer limit
+      });
+
+      const lines = stdout.trim().split("\n");
+      const results: VideoInfo[] = [];
+
+      for (const line of lines) {
+        if (line.trim()) {
+          const parts = line.split("|");
+          if (parts.length >= 5 && parts[0] && parts[1] && parts[4]) {
+            const id = parts[0];
+            const title = parts[1];
+            const url = parts[4];
+            const durationStr = parts[3];
+            const artist = parts[2];
+
+            if (id && title && url) {
+              results.push({
+                id,
+                title,
+                url,
+                duration: durationStr
+                  ? this.parseDurationFromSeconds(durationStr)
+                  : undefined,
+                thumbnail: undefined, // Skip thumbnail for autocomplete speed
+                platform: this.platform,
+                artist: artist || undefined,
+                album: undefined,
+              });
+            }
+          }
+        }
+      }
+
+      return results;
+    } catch (error) {
+      console.error("YouTube autocomplete search error:", error);
+      return [];
+    }
+  }
+
   async getStreamInfo(url: string): Promise<StreamInfo | null> {
     try {
-      const command = `yt-dlp "${url}" --get-url --get-title --get-duration --format "bestaudio" --no-playlist`;
-      const { stdout } = await execAsync(command);
+      const command = `yt-dlp "${url}" --get-url --get-title --get-duration --format "bestaudio" --no-playlist --quiet --no-warnings`;
+      const { stdout } = await execAsync(command, {
+        timeout: 15000, // 15 second timeout for stream info
+      });
       const lines = stdout.trim().split("\n");
 
       if (lines.length >= 2 && lines[0] && lines[1]) {
@@ -74,8 +136,10 @@ export class YouTubeProvider implements IMusicProvider {
 
   async getTrackInfo(url: string): Promise<VideoInfo | null> {
     try {
-      const command = `yt-dlp "${url}" --dump-json --no-playlist`;
-      const { stdout } = await execAsync(command);
+      const command = `yt-dlp "${url}" --dump-json --no-playlist --quiet --no-warnings`;
+      const { stdout } = await execAsync(command, {
+        timeout: 10000, // 10 second timeout
+      });
       const data = JSON.parse(stdout.trim());
       return this.parseVideoInfo(data);
     } catch (error) {
@@ -114,5 +178,10 @@ export class YouTubeProvider implements IMusicProvider {
     }
 
     return duration > 0 ? duration : undefined;
+  }
+
+  private parseDurationFromSeconds(durationStr: string): number | undefined {
+    const duration = parseFloat(durationStr);
+    return isNaN(duration) ? undefined : Math.floor(duration);
   }
 }

@@ -1,4 +1,5 @@
 import { MusicProviderFactory } from "./MusicProviderFactory";
+import { YouTubeProvider } from "./providers/YouTubeProvider";
 import type {
   VideoInfo,
   StreamInfo,
@@ -15,6 +16,37 @@ export class MusicService {
     options?: SearchOptions
   ): Promise<VideoInfo[]> {
     return this.factory.search(query, platform, options);
+  }
+
+  // Fast search specifically for autocomplete
+  static async searchForAutocomplete(
+    query: string,
+    platform?: MusicPlatform,
+    limit: number = 10
+  ): Promise<VideoInfo[]> {
+    try {
+      // For now, only YouTube supports fast autocomplete
+      // Spotify can be added later with similar optimization
+      if (!platform || platform === "youtube") {
+        const youtubeProvider = this.factory.getProvider(
+          "youtube" as MusicPlatform
+        );
+        if (youtubeProvider && youtubeProvider instanceof YouTubeProvider) {
+          return await youtubeProvider.searchForAutocomplete(query, limit);
+        }
+      }
+
+      // Fallback to regular search with timeout protection
+      return Promise.race([
+        this.factory.search(query, platform, { limit }),
+        new Promise<VideoInfo[]>(
+          (resolve) => setTimeout(() => resolve([]), 2000) // 2 second timeout for autocomplete
+        ),
+      ]);
+    } catch (error) {
+      console.error("Autocomplete search error:", error);
+      return [];
+    }
   }
 
   static async getStreamInfo(input: string): Promise<StreamInfo | null> {

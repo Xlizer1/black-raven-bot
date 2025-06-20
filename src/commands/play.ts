@@ -13,7 +13,10 @@ import { GuildMember, MessageFlags } from "discord.js";
 import { MusicService } from "../services/MusicService";
 import { MusicQueue } from "../services/MusicQueue";
 import { logger } from "../utils/logger";
-import { MusicPlatform } from "../services/providers/IMusicProvider";
+import {
+  MusicPlatform,
+  type VideoInfo,
+} from "../services/providers/IMusicProvider";
 
 export class PlayCommand extends Command {
   public constructor(context: Command.LoaderContext, options: Command.Options) {
@@ -25,11 +28,13 @@ export class PlayCommand extends Command {
       builder
         .setName("play")
         .setDescription("Play music from various platforms")
-        .addStringOption((option) =>
-          option
-            .setName("query")
-            .setDescription("Song name, YouTube URL, or Spotify URL")
-            .setRequired(true)
+        .addStringOption(
+          (option) =>
+            option
+              .setName("query")
+              .setDescription("Song name, YouTube URL, or Spotify URL")
+              .setRequired(true)
+              .setAutocomplete(true) // Enable autocomplete
         )
         .addStringOption((option) =>
           option
@@ -42,6 +47,84 @@ export class PlayCommand extends Command {
             .setRequired(false)
         )
     );
+  }
+
+  // Autocomplete handler
+  public override async autocompleteRun(
+    interaction: Command.AutocompleteInteraction
+  ) {
+    try {
+      const focusedOption = interaction.options.getFocused(true);
+
+      // Only provide autocomplete for the query option
+      if (focusedOption.name !== "query") {
+        return interaction.respond([]);
+      }
+
+      const query = focusedOption.value as string;
+
+      // Don't search if query is too short or empty
+      if (!query || query.length < 2) {
+        return interaction.respond([]);
+      }
+
+      // If it's already a URL, don't provide autocomplete
+      if (MusicService.isUrl(query)) {
+        return interaction.respond([]);
+      }
+
+      // Get platform preference from user's current input
+      const platformChoice = interaction.options.getString(
+        "platform"
+      ) as MusicPlatform;
+      const targetPlatform = platformChoice || MusicPlatform.YOUTUBE;
+
+      logger.debug(`Autocomplete search: "${query}" on ${targetPlatform}`);
+
+      // Use fast autocomplete search with timeout protection
+      const searchPromise = MusicService.searchForAutocomplete(
+        query,
+        targetPlatform,
+        8
+      );
+      const timeoutPromise = new Promise<VideoInfo[]>(
+        (resolve) => setTimeout(() => resolve([]), 2500) // 2.5 second timeout
+      );
+
+      const searchResults = await Promise.race([searchPromise, timeoutPromise]);
+
+      // Convert results to autocomplete choices
+      const choices = searchResults.slice(0, 8).map((result) => {
+        // Create display name with artist if available
+        let displayName = result.title;
+        if (result.artist && result.artist !== result.title) {
+          displayName = `${result.artist} - ${result.title}`;
+        }
+
+        // Ensure the choice doesn't exceed Discord's limits
+        if (displayName.length > 95) {
+          displayName = displayName.substring(0, 92) + "...";
+        }
+
+        // Use URL as value for exact matching, fallback to title
+        const value = (result.url || result.title).substring(0, 100);
+
+        return {
+          name: displayName,
+          value: value,
+        };
+      });
+
+      await interaction.respond(choices);
+    } catch (error) {
+      logger.error("Autocomplete search error:", error);
+      // Always respond to avoid Discord errors, even if empty
+      try {
+        await interaction.respond([]);
+      } catch (responseError) {
+        logger.error("Failed to respond to autocomplete:", responseError);
+      }
+    }
   }
 
   public override async chatInputRun(

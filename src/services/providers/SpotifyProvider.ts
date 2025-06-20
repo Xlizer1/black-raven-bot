@@ -325,4 +325,43 @@ export class SpotifyProvider implements IMusicProvider {
 
     return titleMatch && artistMatch && durationMatch;
   }
+
+  async searchForAutocomplete(
+    query: string,
+    limit: number = 10
+  ): Promise<VideoInfo[]> {
+    try {
+      if (!this.isConfigured()) {
+        return [];
+      }
+
+      await this.ensureAuthenticated();
+
+      const searchUrl = new URL(`${SpotifyProvider.BASE_URL}/search`);
+      searchUrl.searchParams.set("q", query);
+      searchUrl.searchParams.set("type", "track");
+      searchUrl.searchParams.set("limit", Math.min(limit, 20).toString());
+
+      const response = await fetch(searchUrl.toString(), {
+        headers: {
+          Authorization: `Bearer ${this.accessToken}`,
+        },
+        signal: AbortSignal.timeout(2000), // 2 second timeout for autocomplete
+      });
+
+      if (!response.ok) {
+        return [];
+      }
+
+      const data = (await response.json()) as SpotifySearchResponse;
+      const tracks = data.tracks?.items || [];
+
+      return tracks
+        .slice(0, limit)
+        .map((track) => this.convertSpotifyTrackToVideoInfo(track));
+    } catch (error) {
+      logger.warn("Spotify autocomplete search error:", error);
+      return [];
+    }
+  }
 }
