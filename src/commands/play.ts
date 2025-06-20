@@ -10,10 +10,10 @@ import {
   StreamType,
 } from "@discordjs/voice";
 import { GuildMember, MessageFlags } from "discord.js";
-import { exec } from "child_process";
-import { promisify } from "util";
-
-const execAsync = promisify(exec);
+import { MusicService } from "../services/MusicService";
+import { MusicQueue } from "../services/MusicQueue";
+import { logger } from "../utils/logger";
+import { MusicPlatform } from "../services/providers/IMusicProvider";
 
 export class PlayCommand extends Command {
   public constructor(context: Command.LoaderContext, options: Command.Options) {
@@ -24,65 +24,24 @@ export class PlayCommand extends Command {
     registry.registerChatInputCommand((builder) =>
       builder
         .setName("play")
-        .setDescription("Play music from YouTube")
+        .setDescription("Play music from various platforms")
         .addStringOption((option) =>
           option
             .setName("query")
-            .setDescription("Song name or YouTube URL")
+            .setDescription("Song name, YouTube URL, or Spotify URL")
             .setRequired(true)
         )
+        .addStringOption((option) =>
+          option
+            .setName("platform")
+            .setDescription("Choose platform to search on")
+            .addChoices(
+              { name: "YouTube", value: "youtube" },
+              { name: "Spotify", value: "spotify" }
+            )
+            .setRequired(false)
+        )
     );
-  }
-
-  private isYouTubeURL(url: string): boolean {
-    return /^(https?:\/\/)?(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/)[\w-]+/.test(
-      url
-    );
-  }
-
-  private async searchYoutube(
-    query: string
-  ): Promise<{ url: string; title: string } | null> {
-    try {
-      const searchCommand = `yt-dlp "ytsearch:${query.replace(
-        /"/g,
-        '\\"'
-      )}" --get-url --get-title --no-playlist -x --audio-format mp3`;
-      const { stdout } = await execAsync(searchCommand);
-      const lines = stdout.trim().split("\n");
-
-      if (lines.length >= 2 && lines[0] && lines[1]) {
-        return {
-          title: lines[0],
-          url: lines[1],
-        };
-      }
-      return null;
-    } catch (error) {
-      console.error("Search error:", error);
-      return null;
-    }
-  }
-
-  private async getStreamUrl(
-    videoUrl: string
-  ): Promise<{ streamUrl: string; title: string } | null> {
-    try {
-      const command = `yt-dlp "${videoUrl}" --get-url --get-title --format "bestaudio" --no-playlist`;
-      const { stdout } = await execAsync(command);
-      const lines = stdout.trim().split("\n");
-
-      if (lines.length >= 2 && lines[0] && lines[1]) {
-        return {
-          title: lines[0],
-          streamUrl: lines[1],
-        };
-      }
-      return null;
-    } catch (error) {
-      console.error("Stream URL error:", error);
-      return null;
-    }
   }
 
   public override async chatInputRun(
@@ -99,103 +58,159 @@ export class PlayCommand extends Command {
       });
     }
 
+    if (!interaction.guild) {
+      return interaction.reply({
+        content: "❌ This command can only be used in a server!",
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+
     const query = interaction.options.getString("query", true);
+    const platformChoice = interaction.options.getString(
+      "platform"
+    ) as MusicPlatform;
 
     await interaction.deferReply();
 
     try {
-      let videoUrl = query;
-      let videoTitle = "Unknown";
+      const queue = MusicQueue.getQueue(interaction.guild.id);
 
-      // If it's not a YouTube URL, search for it
-      if (!this.isYouTubeURL(query)) {
-        console.log(`Searching for: ${query}`);
-        const searchResult = await this.searchYoutube(query);
+      // Detect platform or use user choice
+      const detectedPlatform = MusicService.detectPlatform(query);
+      const targetPlatform =
+        platformChoice || detectedPlatform || MusicPlatform.YOUTUBE;
 
-        if (!searchResult) {
-          return interaction.editReply(
-            "❌ Couldn't find that song on YouTube!"
-          );
-        }
+      logger.info(`Processing ${targetPlatform} request: ${query}`);
 
-        videoUrl = searchResult.url;
-        videoTitle = searchResult.title;
-        console.log(`Found: ${videoTitle}`);
+      // Get track info
+      let trackInfo;
+      if (MusicService.isUrl(query)) {
+        trackInfo = await MusicService.getTrackInfo(query);
+      } else {
+        const searchResults = await MusicService.search(query, targetPlatform, {
+          limit: 1,
+        });
+        trackInfo = searchResults[0] || null;
       }
 
-      // Get stream URL
-      console.log(`Getting stream URL for: ${videoUrl}`);
-      const streamInfo = await this.getStreamUrl(videoUrl);
-
-      if (!streamInfo) {
-        return interaction.editReply(
-          "❌ Could not get stream URL for this video!"
-        );
+      if (!trackInfo) {
+        return interaction.editReply("❌ Couldn't find that song!");
       }
 
-      videoTitle = streamInfo.title;
-      console.log(`Stream URL obtained for: ${videoTitle}`);
-
-      // Join voice channel
-      const connection = joinVoiceChannel({
-        channelId: voiceChannel.id,
-        guildId: interaction.guild!.id,
-        adapterCreator: interaction.guild!.voiceAdapterCreator as any,
+      // Add to queue
+      const queueItem = queue.add({
+        ...trackInfo,
+        requestedBy: interaction.user.id,
       });
 
-      // Wait for connection to be ready
-      await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+      // If nothing is playing, start playing
+      if (!queue.getIsPlaying()) {
+        await this.playNext(queue, voiceChannel, interaction);
+      } else {
+        // Just notify about queue addition
+        const position = queue.size();
+        return interaction.editReply({
+          content: `➕ Added to queue: **${trackInfo.title}**\n📍 Position: ${position}\n🎵 Platform: ${trackInfo.platform}`,
+        });
+      }
+    } catch (error) {
+      logger.error("Play command error:", error);
+      return interaction.editReply(
+        "❌ An error occurred while trying to play the song!"
+      );
+    }
+  }
 
-      // Create audio resource from the stream URL
+  private async playNext(
+    queue: MusicQueue,
+    voiceChannel: any,
+    interaction: any
+  ) {
+    const currentSong = queue.next();
+    if (!currentSong) {
+      queue.setPlaying(false);
+      return;
+    }
+
+    queue.setCurrentSong(currentSong);
+    queue.setPlaying(true);
+
+    try {
+      // Get stream info
+      const streamInfo = await MusicService.getStreamInfo(currentSong.url);
+      if (!streamInfo) {
+        logger.error(`Failed to get stream for: ${currentSong.title}`);
+        return this.playNext(queue, voiceChannel, interaction);
+      }
+
+      // Join voice channel if not connected
+      let connection = queue.getConnection();
+      if (!connection) {
+        connection = joinVoiceChannel({
+          channelId: voiceChannel.id,
+          guildId: interaction.guild!.id,
+          adapterCreator: interaction.guild!.voiceAdapterCreator as any,
+        });
+        queue.setConnection(connection);
+        await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+      }
+
+      // Create audio resource
       const resource = createAudioResource(streamInfo.streamUrl, {
         inputType: StreamType.Arbitrary,
       });
 
-      // Create and configure audio player
-      const player = createAudioPlayer({
-        behaviors: {
-          noSubscriber: NoSubscriberBehavior.Play,
-        },
-      });
+      // Create player if needed
+      let player = queue.getPlayer();
+      if (!player) {
+        player = createAudioPlayer({
+          behaviors: {
+            noSubscriber: NoSubscriberBehavior.Play,
+          },
+        });
+        queue.setPlayer(player);
 
-      let connectionDestroyed = false;
+        // Set up player events
+        player.on(AudioPlayerStatus.Idle, () => {
+          logger.info("Song finished, playing next");
+          this.playNext(queue, voiceChannel, interaction);
+        });
 
-      const cleanupConnection = () => {
-        if (
-          !connectionDestroyed &&
-          connection.state.status !== VoiceConnectionStatus.Destroyed
-        ) {
-          connectionDestroyed = true;
-          connection.destroy();
-        }
-      };
+        player.on("error", (error) => {
+          logger.error("Audio player error:", error);
+          this.playNext(queue, voiceChannel, interaction);
+        });
 
-      player.on(AudioPlayerStatus.Playing, () => {
-        console.log(`Now playing: ${videoTitle}`);
-      });
-
-      player.on(AudioPlayerStatus.Idle, () => {
-        console.log("Finished playing audio");
-        cleanupConnection();
-      });
-
-      player.on("error", (error) => {
-        console.error("Audio player error:", error.message);
-        cleanupConnection();
-      });
+        connection.subscribe(player);
+      }
 
       // Play the audio
       player.play(resource);
-      connection.subscribe(player);
+
+      const platformEmoji = this.getPlatformEmoji(currentSong.platform);
+      const duration = currentSong.duration
+        ? ` (${MusicService.formatDuration(currentSong.duration)})`
+        : "";
 
       return interaction.editReply({
-        content: `🎵 Now playing: **${videoTitle}**`,
+        content: `${platformEmoji} Now playing: **${currentSong.title}**${duration}\n👤 Requested by: <@${currentSong.requestedBy}>`,
       });
     } catch (error) {
-      console.error("Play command error:", error);
-      return interaction.editReply(
-        "❌ An error occurred while trying to play the song! Make sure yt-dlp is installed on your system."
-      );
+      logger.error("Playback error:", error);
+      return this.playNext(queue, voiceChannel, interaction);
+    }
+  }
+
+  private getPlatformEmoji(platform: MusicPlatform): string {
+    switch (platform) {
+      case MusicPlatform.YOUTUBE:
+        return "📺";
+      case MusicPlatform.SPOTIFY:
+        return "🟢";
+      case MusicPlatform.SOUNDCLOUD:
+        return "🟠";
+      default:
+        return "🎵";
     }
   }
 }
