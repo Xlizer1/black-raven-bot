@@ -10,8 +10,10 @@ import {
   StreamType,
 } from "@discordjs/voice";
 import { GuildMember, MessageFlags } from "discord.js";
-import ytdl from "ytdl-core";
-import ytsr from "ytsr";
+import { exec } from "child_process";
+import { promisify } from "util";
+
+const execAsync = promisify(exec);
 
 export class PlayCommand extends Command {
   public constructor(context: Command.LoaderContext, options: Command.Options) {
@@ -30,6 +32,57 @@ export class PlayCommand extends Command {
             .setRequired(true)
         )
     );
+  }
+
+  private isYouTubeURL(url: string): boolean {
+    return /^(https?:\/\/)?(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/)[\w-]+/.test(
+      url
+    );
+  }
+
+  private async searchYoutube(
+    query: string
+  ): Promise<{ url: string; title: string } | null> {
+    try {
+      const searchCommand = `yt-dlp "ytsearch:${query.replace(
+        /"/g,
+        '\\"'
+      )}" --get-url --get-title --no-playlist -x --audio-format mp3`;
+      const { stdout } = await execAsync(searchCommand);
+      const lines = stdout.trim().split("\n");
+
+      if (lines.length >= 2 && lines[0] && lines[1]) {
+        return {
+          title: lines[0],
+          url: lines[1],
+        };
+      }
+      return null;
+    } catch (error) {
+      console.error("Search error:", error);
+      return null;
+    }
+  }
+
+  private async getStreamUrl(
+    videoUrl: string
+  ): Promise<{ streamUrl: string; title: string } | null> {
+    try {
+      const command = `yt-dlp "${videoUrl}" --get-url --get-title --format "bestaudio" --no-playlist`;
+      const { stdout } = await execAsync(command);
+      const lines = stdout.trim().split("\n");
+
+      if (lines.length >= 2 && lines[0] && lines[1]) {
+        return {
+          title: lines[0],
+          streamUrl: lines[1],
+        };
+      }
+      return null;
+    } catch (error) {
+      console.error("Stream URL error:", error);
+      return null;
+    }
   }
 
   public override async chatInputRun(
@@ -51,67 +104,50 @@ export class PlayCommand extends Command {
     await interaction.deferReply();
 
     try {
-      let url = query;
+      let videoUrl = query;
       let videoTitle = "Unknown";
 
       // If it's not a YouTube URL, search for it
-      if (!ytdl.validateURL(query)) {
+      if (!this.isYouTubeURL(query)) {
         console.log(`Searching for: ${query}`);
-        const searchResults = await ytsr(query, { limit: 1 });
+        const searchResult = await this.searchYoutube(query);
 
-        if (!searchResults.items.length) {
+        if (!searchResult) {
           return interaction.editReply(
             "❌ Couldn't find that song on YouTube!"
           );
         }
 
-        const firstVideo = searchResults.items.find(
-          (item) => item.type === "video"
-        ) as any;
-        if (!firstVideo) {
-          return interaction.editReply(
-            "❌ Couldn't find any videos for that search!"
-          );
-        }
-
-        url = firstVideo.url;
-        videoTitle = firstVideo.title;
-        console.log(`Found: ${videoTitle} - ${url}`);
-      } else {
-        // Get video info for display
-        try {
-          const info = await ytdl.getInfo(url);
-          videoTitle = info.videoDetails.title;
-        } catch (infoError) {
-          console.log(
-            "Could not get video info, but will try to stream anyway"
-          );
-        }
+        videoUrl = searchResult.url;
+        videoTitle = searchResult.title;
+        console.log(`Found: ${videoTitle}`);
       }
 
-      // Validate the final URL
-      if (!ytdl.validateURL(url)) {
-        return interaction.editReply("❌ Invalid YouTube URL!");
+      // Get stream URL
+      console.log(`Getting stream URL for: ${videoUrl}`);
+      const streamInfo = await this.getStreamUrl(videoUrl);
+
+      if (!streamInfo) {
+        return interaction.editReply(
+          "❌ Could not get stream URL for this video!"
+        );
       }
+
+      videoTitle = streamInfo.title;
+      console.log(`Stream URL obtained for: ${videoTitle}`);
 
       // Join voice channel
       const connection = joinVoiceChannel({
         channelId: voiceChannel.id,
         guildId: interaction.guild!.id,
-        adapterCreator: interaction.guild!.voiceAdapterCreator,
+        adapterCreator: interaction.guild!.voiceAdapterCreator as any,
       });
 
       // Wait for connection to be ready
       await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
 
-      // Create audio stream
-      const stream = ytdl(url, {
-        filter: "audioonly",
-        quality: "lowestaudio",
-        highWaterMark: 1 << 25,
-      });
-
-      const resource = createAudioResource(stream, {
+      // Create audio resource from the stream URL
+      const resource = createAudioResource(streamInfo.streamUrl, {
         inputType: StreamType.Arbitrary,
       });
 
@@ -122,18 +158,30 @@ export class PlayCommand extends Command {
         },
       });
 
+      let connectionDestroyed = false;
+
+      const cleanupConnection = () => {
+        if (
+          !connectionDestroyed &&
+          connection.state.status !== VoiceConnectionStatus.Destroyed
+        ) {
+          connectionDestroyed = true;
+          connection.destroy();
+        }
+      };
+
       player.on(AudioPlayerStatus.Playing, () => {
         console.log(`Now playing: ${videoTitle}`);
       });
 
       player.on(AudioPlayerStatus.Idle, () => {
         console.log("Finished playing audio");
-        connection.destroy();
+        cleanupConnection();
       });
 
       player.on("error", (error) => {
-        console.error("Audio player error:", error);
-        connection.destroy();
+        console.error("Audio player error:", error.message);
+        cleanupConnection();
       });
 
       // Play the audio
@@ -146,7 +194,7 @@ export class PlayCommand extends Command {
     } catch (error) {
       console.error("Play command error:", error);
       return interaction.editReply(
-        "❌ An error occurred while trying to play the song! The video might be restricted or unavailable."
+        "❌ An error occurred while trying to play the song! Make sure yt-dlp is installed on your system."
       );
     }
   }
