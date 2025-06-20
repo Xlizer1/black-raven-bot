@@ -139,12 +139,15 @@ export class SeekCommand extends Command {
 
         if (parts.length === 2) {
           // MM:SS format
-          const [minutes, seconds] = parts;
+          const minutes = parts[0] ?? 0;
+          const seconds = parts[1] ?? 0;
           if (seconds >= 60) return null; // Invalid seconds
           return minutes * 60 + seconds;
         } else if (parts.length === 3) {
           // HH:MM:SS format
-          const [hours, minutes, seconds] = parts;
+          const hours = parts[0] ?? 0;
+          const minutes = parts[1] ?? 0;
+          const seconds = parts[2] ?? 0;
           if (minutes >= 60 || seconds >= 60) return null; // Invalid minutes/seconds
           return hours * 3600 + minutes * 60 + seconds;
         }

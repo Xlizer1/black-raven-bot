@@ -8,7 +8,7 @@ import {
   ButtonStyle,
   ActionRowBuilder,
 } from "discord.js";
-import { MusicQueue } from "../services/MusicQueue";
+import { MusicQueue, type QueueItem } from "../services/MusicQueue";
 import { MusicService } from "../services/MusicService";
 
 export class HistoryCommand extends Command {
@@ -207,7 +207,7 @@ export class HistoryCommand extends Command {
     }
   }
 
-  private getPlatformStats(history: any[]): string {
+  private getPlatformStats(history: readonly QueueItem[]): string {
     const platformCounts: { [key: string]: number } = {};
 
     history.forEach((song) => {

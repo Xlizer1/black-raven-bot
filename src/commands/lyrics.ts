@@ -205,7 +205,7 @@ export class LyricsCommand extends Command {
       )}/${encodeURIComponent(title)}`;
 
       const response = await fetch(url, {
-        timeout: 10000,
+        signal: AbortSignal.timeout(10000),
         headers: {
           "User-Agent": "Discord Music Bot",
         },

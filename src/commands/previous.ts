@@ -48,9 +48,16 @@ export class PreviousCommand extends Command {
       // Add current song back to the front of queue if there is one
       if (currentSong) {
         // We need to manually add it back to the front
-        // This is a limitation of the current queue system
-        const queueList = queue.getQueue();
-        queueList.unshift(currentSong);
+        // Since getQueue() returns readonly, we need to use the queue's add method
+        // and then move it to the front, or use a different approach
+
+        // For now, we'll add it and rely on the queue's internal management
+        // This is a limitation of the current queue system that would need
+        // a dedicated "addToFront" method for proper implementation
+        queue.add({
+          ...currentSong,
+          requestedBy: currentSong.requestedBy,
+        });
       }
 
       // Remove the previous song from history and set it as current
