@@ -3,7 +3,7 @@
 import { Command } from "@sapphire/framework";
 import { MessageFlags, EmbedBuilder } from "discord.js";
 import { AudioPlayerStatus } from "@discordjs/voice";
-import { MusicQueue } from "../services/MusicQueue";
+import { MusicQueue, RepeatMode } from "../services/MusicQueue";
 import { MusicService } from "../services/MusicService";
 import { logger } from "../utils/logger";
 
@@ -179,10 +179,8 @@ export class PlaybackCommand extends Command {
     }
 
     try {
-      // Note: Discord.js voice doesn't have built-in volume control
-      // This would require implementing a custom volume transformer
-      // For now, we'll store the volume preference and show it
-      queue.setVolume?.(volume / 100); // If you implement this method
+      // Store the volume preference (Discord.js voice doesn't have built-in volume control)
+      queue.setVolume(volume / 100);
 
       return interaction.reply({
         content: `🔊 Volume set to ${volume}%`,
@@ -201,24 +199,40 @@ export class PlaybackCommand extends Command {
     interaction: Command.ChatInputCommandInteraction,
     queue: MusicQueue
   ) {
-    const mode = interaction.options.getString("mode", true) as
-      | "off"
-      | "track"
-      | "queue";
+    const modeString = interaction.options.getString("mode", true);
+
+    // Convert string to RepeatMode enum
+    let mode: RepeatMode;
+    switch (modeString) {
+      case "off":
+        mode = RepeatMode.OFF;
+        break;
+      case "track":
+        mode = RepeatMode.TRACK;
+        break;
+      case "queue":
+        mode = RepeatMode.QUEUE;
+        break;
+      default:
+        return interaction.reply({
+          content: "❌ Invalid repeat mode!",
+          flags: MessageFlags.Ephemeral,
+        });
+    }
 
     try {
-      queue.setRepeatMode?.(mode); // If you implement this method
+      queue.setRepeatMode(mode);
 
       const modeEmojis = {
-        off: "🔁",
-        track: "🔂",
-        queue: "🔁",
+        [RepeatMode.OFF]: "🔁",
+        [RepeatMode.TRACK]: "🔂",
+        [RepeatMode.QUEUE]: "🔁",
       };
 
       const modeNames = {
-        off: "Off",
-        track: "Track",
-        queue: "Queue",
+        [RepeatMode.OFF]: "Off",
+        [RepeatMode.TRACK]: "Track",
+        [RepeatMode.QUEUE]: "Queue",
       };
 
       return interaction.reply({
@@ -313,6 +327,20 @@ export class PlaybackCommand extends Command {
         inline: true,
       });
     }
+
+    // Repeat mode info
+    const repeatMode = queue.getRepeatMode();
+    const repeatModeNames = {
+      [RepeatMode.OFF]: "Off",
+      [RepeatMode.TRACK]: "Track",
+      [RepeatMode.QUEUE]: "Queue",
+    };
+
+    fields.push({
+      name: "🔁 Repeat",
+      value: repeatModeNames[repeatMode],
+      inline: true,
+    });
 
     embed.addFields(fields);
 

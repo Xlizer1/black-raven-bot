@@ -239,7 +239,7 @@ export class QueueCommand extends Command {
 
     const skipped = Math.min(count, queue.size() + 1); // +1 for current song
 
-    // Skip songs
+    // Skip songs from queue
     for (let i = 1; i < count && queue.size() > 0; i++) {
       queue.next();
     }
@@ -269,7 +269,7 @@ export class QueueCommand extends Command {
       });
     }
 
-    const removed = queue.remove(position - 1);
+    const removed = queue.removeFromQueue(position - 1);
     if (removed) {
       return interaction.reply({
         content: `🗑️ Removed **${removed.title}** from position ${position}!`,
@@ -311,7 +311,7 @@ export class QueueCommand extends Command {
     }
 
     const count = queue.size();
-    queue.getQueue().length = 0; // Clear without stopping current song
+    queue.clearQueue(); // Use the new method from MusicQueue
 
     return interaction.reply({
       content: `🗑️ Cleared ${count} songs from the queue!`,
@@ -340,10 +340,11 @@ export class QueueCommand extends Command {
       });
     }
 
-    // Move the song
-    const song = queueList.splice(from - 1, 1)[0];
-    if (song) {
-      queueList.splice(to - 1, 0, song);
+    // Get the song title before moving for the response
+    const song = queueList[from - 1];
+    const success = queue.moveInQueue(from - 1, to - 1); // Use the new method
+
+    if (success && song) {
       return interaction.reply({
         content: `📍 Moved **${song.title}** from position ${from} to ${to}!`,
       });
