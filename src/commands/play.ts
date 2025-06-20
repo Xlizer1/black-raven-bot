@@ -125,7 +125,7 @@ export class PlayCommand extends Command {
     queue: MusicQueue,
     voiceChannel: any,
     interaction: any
-  ) {
+  ): Promise<void> {
     const currentSong = queue.next();
     if (!currentSong) {
       queue.setPlaying(false);
