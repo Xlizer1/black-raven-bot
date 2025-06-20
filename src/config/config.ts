@@ -9,6 +9,10 @@ export interface BotConfig {
   maxQueueSize: number;
   voiceTimeout: number;
   embedColor: number;
+  spotify: {
+    clientId?: string;
+    clientSecret?: string;
+  };
 }
 
 class ConfigManager {
@@ -19,6 +23,10 @@ class ConfigManager {
     this.validateEnvironment();
     this.config = {
       token: process.env.TOKEN!,
+      spotify: {
+        clientId: process.env.SPOTIFY_CLIENT_ID,
+        clientSecret: process.env.SPOTIFY_CLIENT_SECRET,
+      },
       prefix: process.env.PREFIX || "!",
       maxVolumeLevel: parseInt(process.env.MAX_VOLUME || "100"),
       maxQueueSize: parseInt(process.env.MAX_QUEUE_SIZE || "50"),

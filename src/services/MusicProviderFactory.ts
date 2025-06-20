@@ -1,9 +1,9 @@
 import {
   type IMusicProvider,
-  MusicPlatform,
   type VideoInfo,
   type StreamInfo,
   type SearchOptions,
+  MusicPlatform,
 } from "./providers/IMusicProvider";
 import { YouTubeProvider } from "./providers/YouTubeProvider";
 import { SpotifyProvider } from "./providers/SpotifyProvider";
@@ -16,7 +16,7 @@ export class MusicProviderFactory {
   private constructor() {
     this.providers = new Map();
     this.registerProvider(new YouTubeProvider());
-    // this.registerProvider(new SpotifyProvider()); // Enable when implemented
+    this.registerProvider(new SpotifyProvider()); // Enable Spotify!
   }
 
   static getInstance(): MusicProviderFactory {
