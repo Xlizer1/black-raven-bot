@@ -127,7 +127,7 @@ export class MusicQueue {
     }
   }
 
-  getQueue(): QueueItem[] {
+  getQueue(): readonly QueueItem[] {
     return [...this.queue];
   }
 
