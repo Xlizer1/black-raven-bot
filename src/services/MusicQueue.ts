@@ -1,9 +1,16 @@
 import { VoiceConnection, AudioPlayer } from "@discordjs/voice";
 import type { VideoInfo } from "./providers/IMusicProvider";
+import { logger } from "../utils/logger";
 
 export interface QueueItem extends VideoInfo {
   requestedBy: string; // User ID
   addedAt: Date;
+}
+
+export enum RepeatMode {
+  OFF = "off",
+  TRACK = "track",
+  QUEUE = "queue",
 }
 
 export class MusicQueue {
@@ -14,6 +21,12 @@ export class MusicQueue {
   private isPlaying = false;
   private connection: VoiceConnection | null = null;
   private player: AudioPlayer | null = null;
+
+  // New properties
+  private repeatMode: RepeatMode = RepeatMode.OFF;
+  private volume: number = 1.0;
+  private history: QueueItem[] = [];
+  private autoLeaveTimeout: NodeJS.Timeout | null = null;
 
   private constructor(private guildId: string) {}
 
@@ -32,6 +45,7 @@ export class MusicQueue {
     }
   }
 
+  // Existing methods (keep these as they are)
   add(item: Omit<QueueItem, "addedAt">): QueueItem {
     const queueItem: QueueItem = {
       ...item,
@@ -50,9 +64,34 @@ export class MusicQueue {
     return null;
   }
 
+  // Enhanced next() method with repeat logic
   next(): QueueItem | null {
-    const item = this.queue.shift();
-    return item !== undefined ? item : null;
+    const current = this.currentSong;
+
+    if (current) {
+      this.addToHistory(current);
+
+      // Handle repeat modes
+      if (this.repeatMode === RepeatMode.TRACK) {
+        return current; // Repeat current song
+      }
+    }
+
+    const nextItem = this.queue.shift();
+
+    // Handle queue repeat
+    if (
+      !nextItem &&
+      this.repeatMode === RepeatMode.QUEUE &&
+      this.history.length > 0
+    ) {
+      // Restart queue from history (in reverse order)
+      this.queue = [...this.history.reverse()];
+      this.history = [];
+      return this.queue.shift() || null;
+    }
+
+    return nextItem || null;
   }
 
   peek(): QueueItem | null {
@@ -60,10 +99,12 @@ export class MusicQueue {
     return item ?? null;
   }
 
+  // Enhanced clear method
   clear(): void {
     this.queue = [];
     this.currentSong = null;
     this.isPlaying = false;
+    this.clearAutoLeaveTimer();
 
     if (this.connection) {
       this.connection.destroy();
@@ -86,7 +127,7 @@ export class MusicQueue {
     }
   }
 
-  getQueue(): readonly QueueItem[] {
+  getQueue(): QueueItem[] {
     return [...this.queue];
   }
 
@@ -116,6 +157,11 @@ export class MusicQueue {
 
   setPlaying(playing: boolean): void {
     this.isPlaying = playing;
+    if (playing) {
+      this.clearAutoLeaveTimer();
+    } else {
+      this.startAutoLeaveTimer();
+    }
   }
 
   getIsPlaying(): boolean {
@@ -128,5 +174,86 @@ export class MusicQueue {
 
   size(): number {
     return this.queue.length;
+  }
+
+  // NEW METHODS FOR QUEUE MANIPULATION
+  clearQueue(): void {
+    this.queue.length = 0;
+  }
+
+  removeFromQueue(index: number): QueueItem | null {
+    if (index >= 0 && index < this.queue.length) {
+      const removed = this.queue.splice(index, 1)[0];
+      return removed ?? null;
+    }
+    return null;
+  }
+
+  moveInQueue(from: number, to: number): boolean {
+    if (
+      from >= 0 &&
+      from < this.queue.length &&
+      to >= 0 &&
+      to < this.queue.length
+    ) {
+      const song = this.queue.splice(from, 1)[0];
+      if (song) {
+        this.queue.splice(to, 0, song);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // NEW METHODS FOR REPEAT MODE
+  setRepeatMode(mode: RepeatMode): void {
+    this.repeatMode = mode;
+  }
+
+  getRepeatMode(): RepeatMode {
+    return this.repeatMode;
+  }
+
+  // NEW METHODS FOR VOLUME
+  setVolume(volume: number): void {
+    this.volume = Math.max(0, Math.min(1, volume));
+  }
+
+  getVolume(): number {
+    return this.volume;
+  }
+
+  // NEW METHODS FOR HISTORY
+  addToHistory(item: QueueItem): void {
+    this.history.unshift(item);
+    // Keep only last 50 songs in history
+    if (this.history.length > 50) {
+      this.history = this.history.slice(0, 50);
+    }
+  }
+
+  getHistory(): readonly QueueItem[] {
+    return [...this.history];
+  }
+
+  // NEW METHODS FOR AUTO-LEAVE
+  startAutoLeaveTimer(): void {
+    this.clearAutoLeaveTimer();
+    this.autoLeaveTimeout = setTimeout(() => {
+      if (this.connection && this.queue.length === 0 && !this.isPlaying) {
+        this.connection.destroy();
+        this.connection = null;
+        logger.info(
+          `Auto-left voice channel due to inactivity: ${this.guildId}`
+        );
+      }
+    }, 5 * 60 * 1000); // 5 minutes
+  }
+
+  clearAutoLeaveTimer(): void {
+    if (this.autoLeaveTimeout) {
+      clearTimeout(this.autoLeaveTimeout);
+      this.autoLeaveTimeout = null;
+    }
   }
 }
