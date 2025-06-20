@@ -28,17 +28,17 @@ export class YouTubeProvider implements IMusicProvider {
       const limit = options.limit || 1;
       const sanitizedQuery = query.replace(/[;&|`$(){}[\]\\]/g, "");
 
-      // Use a lightweight search command that only gets essential fields
-      const searchCommand = `yt-dlp "ytsearch${limit}:${sanitizedQuery}" --dump-json --no-playlist --no-download --skip-download --ignore-errors --quiet --no-warnings`;
+      // Use basic search for metadata only
+      const searchCommand = `yt-dlp "ytsearch${limit}:${sanitizedQuery}" --dump-json --no-download --skip-download --ignore-errors --no-warnings`;
 
       const { stdout } = await execAsync(searchCommand, {
-        timeout: 10000, // 10 second timeout
-        maxBuffer: 1024 * 1024 * 2, // 2MB buffer limit
+        timeout: 15000,
+        maxBuffer: 1024 * 1024 * 3,
       });
 
       const lines = stdout.trim().split("\n");
-
       const results: VideoInfo[] = [];
+
       for (const line of lines) {
         if (line.trim()) {
           try {
@@ -57,24 +57,20 @@ export class YouTubeProvider implements IMusicProvider {
     }
   }
 
-  // Fast search specifically for autocomplete with minimal data
   async searchForAutocomplete(
     query: string,
-    limit: number = 10
+    limit: number = 6
   ): Promise<VideoInfo[]> {
     try {
       const sanitizedQuery = query.replace(/[;&|`$(){}[\]\\]/g, "");
 
-      // Ultra-lightweight command for autocomplete - only get essential data
-      const searchCommand = `yt-dlp "ytsearch${Math.min(
-        limit,
-        6
-      )}:${sanitizedQuery}" --print "%(id)s|%(title)s|%(uploader)s|%(duration)s|%(webpage_url)s" --no-playlist --no-download --skip-download --ignore-errors --quiet --no-warnings --no-check-certificates`;
+      // Simple command for autocomplete
+      const searchCommand = `yt-dlp "ytsearch${limit}:${sanitizedQuery}" --print "%(id)s|%(title)s|%(uploader)s|%(duration)s|%(webpage_url)s" --no-download --skip-download --ignore-errors --no-warnings --extractor-retries 2`;
 
       const { stdout } = await execAsync(searchCommand, {
-        timeout: 2000, // Reduced to 2 seconds for autocomplete
-        maxBuffer: 1024 * 256, // Reduced to 256KB buffer limit
-        killSignal: "SIGKILL", // Use SIGKILL instead of SIGTERM
+        timeout: 3000,
+        maxBuffer: 1024 * 512,
+        killSignal: "SIGKILL",
       });
 
       const lines = stdout.trim().split("\n");
@@ -84,9 +80,9 @@ export class YouTubeProvider implements IMusicProvider {
         if (line.trim()) {
           const parts = line.split("|");
           if (parts.length >= 5 && parts[0] && parts[1] && parts[4]) {
-            const id = parts[0];
-            const title = parts[1];
-            const url = parts[4];
+            const id = parts[0] || "unknown";
+            const title = parts[1] || "Unknown";
+            const url = parts[4] || "";
             const durationStr = parts[3];
             const artist = parts[2];
 
@@ -98,7 +94,7 @@ export class YouTubeProvider implements IMusicProvider {
                 duration: durationStr
                   ? this.parseDurationFromSeconds(durationStr)
                   : undefined,
-                thumbnail: undefined, // Skip thumbnail for autocomplete speed
+                thumbnail: undefined,
                 platform: this.platform,
                 artist: artist || undefined,
                 album: undefined,
@@ -110,7 +106,6 @@ export class YouTubeProvider implements IMusicProvider {
 
       return results;
     } catch (error) {
-      // Handle timeout errors gracefully
       if (error && typeof error === "object") {
         const execError = error as any;
         if (
@@ -128,38 +123,137 @@ export class YouTubeProvider implements IMusicProvider {
   }
 
   async getStreamInfo(url: string): Promise<StreamInfo | null> {
-    try {
-      const command = `yt-dlp "${url}" --get-url --get-title --get-duration --format "bestaudio" --no-playlist --quiet --no-warnings`;
-      const { stdout } = await execAsync(command, {
-        timeout: 15000, // 15 second timeout for stream info
-      });
-      const lines = stdout.trim().split("\n");
+    // First, get basic track info (this usually works even when streaming fails)
+    let title = "Unknown";
+    let duration: number | undefined;
 
-      if (lines.length >= 2 && lines[0] && lines[1]) {
-        return {
-          title: lines[0],
-          streamUrl: lines[1],
-          duration: lines[2] ? this.parseDuration(lines[2]) : undefined,
-          platform: this.platform,
-        };
+    try {
+      const infoCommand = `yt-dlp "${url}" --get-title --get-duration --no-warnings`;
+      const { stdout: infoOutput } = await execAsync(infoCommand, {
+        timeout: 10000,
+      });
+      const infoLines = infoOutput.trim().split("\n");
+      if (infoLines.length >= 2) {
+        title = infoLines[0] || "Unknown";
+        duration = infoLines[1] ? this.parseDuration(infoLines[1]) : undefined;
       }
-      return null;
     } catch (error) {
-      console.error("YouTube stream error:", error);
-      return null;
+      console.warn("Could not get basic info, using defaults");
     }
+
+    // Now try streaming strategies - using EXACT command that worked in your manual test
+    const strategies = [
+      // Strategy 1: Your exact working command
+      {
+        name: "Manual test replica",
+        command: `yt-dlp "${url}" --get-url --format "bestaudio[ext=m4a]/bestaudio/best" --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" --referer "https://www.youtube.com/" --extractor-retries 5 --fragment-retries 5`,
+        timeout: 20000,
+      },
+      // Strategy 2: Alternative format selection
+      {
+        name: "Format fallback",
+        command: `yt-dlp "${url}" --get-url --format "140/251/250/249/bestaudio/worst" --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" --referer "https://www.youtube.com/" --extractor-retries 3 --fragment-retries 3`,
+        timeout: 25000,
+      },
+      // Strategy 3: Ultra-simple approach
+      {
+        name: "Simple approach",
+        command: `yt-dlp "${url}" --get-url --format "worst" --no-warnings`,
+        timeout: 15000,
+      },
+    ];
+
+    for (const strategy of strategies) {
+      try {
+        console.log(`🔄 Trying streaming strategy: ${strategy.name}`);
+
+        const { stdout } = await execAsync(strategy.command, {
+          timeout: strategy.timeout,
+        });
+
+        const streamUrl = stdout.trim();
+
+        if (streamUrl && streamUrl.startsWith("http")) {
+          console.log(`✅ Success with strategy: ${strategy.name}`);
+          return {
+            title,
+            streamUrl,
+            duration,
+            platform: this.platform,
+          };
+        }
+      } catch (error) {
+        console.warn(`❌ Strategy "${strategy.name}" failed:`, error);
+
+        // Log specific error types for debugging
+        if (error && typeof error === "object") {
+          const execError = error as any;
+          if (execError.stderr) {
+            if (execError.stderr.includes("403")) {
+              console.warn(`   → 403 Forbidden error`);
+            } else if (execError.stderr.includes("fragment")) {
+              console.warn(`   → Fragment download error`);
+            } else if (execError.stderr.includes("Sign in to confirm")) {
+              console.warn(`   → Age-restricted content`);
+            }
+          }
+        }
+
+        // Continue to next strategy
+        continue;
+      }
+    }
+
+    // All streaming strategies failed, but we might have metadata
+    console.error(`❌ All streaming strategies failed for: ${title}`);
+    console.log(
+      `ℹ️  This video may be region-locked, age-restricted, or heavily protected`
+    );
+
+    return null;
   }
 
   async getTrackInfo(url: string): Promise<VideoInfo | null> {
     try {
-      const command = `yt-dlp "${url}" --dump-json --no-playlist --quiet --no-warnings`;
+      // Try comprehensive info first
+      const command = `yt-dlp "${url}" --dump-json --no-download --skip-download --no-warnings`;
       const { stdout } = await execAsync(command, {
-        timeout: 10000, // 10 second timeout
+        timeout: 15000,
       });
       const data = JSON.parse(stdout.trim());
       return this.parseVideoInfo(data);
     } catch (error) {
-      console.error("YouTube track info error:", error);
+      console.warn("Full info extraction failed, trying basic info...");
+
+      // Fallback to basic info (this usually works)
+      try {
+        const simpleCommand = `yt-dlp "${url}" --get-title --get-duration --get-id --no-warnings`;
+        const { stdout } = await execAsync(simpleCommand, {
+          timeout: 10000,
+        });
+        const lines = stdout.trim().split("\n");
+
+        if (lines.length >= 1 && lines[0]) {
+          const extractedId =
+            lines.length >= 3 && lines[2] ? lines[2] : this.extractVideoId(url);
+          return {
+            id: extractedId,
+            title: lines[0] || "Unknown",
+            url: url,
+            duration:
+              lines.length >= 2 && lines[1]
+                ? this.parseDuration(lines[1])
+                : undefined,
+            thumbnail: undefined,
+            platform: this.platform,
+            artist: undefined,
+            album: undefined,
+          };
+        }
+      } catch (fallbackError) {
+        console.error("Even basic track info failed:", fallbackError);
+      }
+
       return null;
     }
   }
@@ -174,30 +268,43 @@ export class YouTubeProvider implements IMusicProvider {
 
   private parseVideoInfo(data: any): VideoInfo {
     return {
-      id: data.id,
+      id: data.id || "unknown",
       title: data.title || "Unknown",
-      url: data.webpage_url || data.url,
+      url: data.webpage_url || data.url || "",
       duration: data.duration,
       thumbnail: data.thumbnail,
       platform: this.platform,
       artist: data.uploader,
-      album: undefined, // YouTube doesn't have albums
+      album: undefined,
     };
   }
 
   private parseDuration(durationStr: string): number | undefined {
-    const parts = durationStr.split(":").reverse();
-    let duration = 0;
+    if (!durationStr) return undefined;
 
-    for (let i = 0; i < parts.length; i++) {
-      duration += parseInt(parts[i] || "0") * Math.pow(60, i);
+    // Handle both "MM:SS" and seconds format
+    if (durationStr.includes(":")) {
+      const parts = durationStr.split(":").reverse();
+      let duration = 0;
+      for (let i = 0; i < parts.length; i++) {
+        duration += parseInt(parts[i] || "0") * Math.pow(60, i);
+      }
+      return duration > 0 ? duration : undefined;
+    } else {
+      const duration = parseFloat(durationStr);
+      return isNaN(duration) ? undefined : Math.floor(duration);
     }
-
-    return duration > 0 ? duration : undefined;
   }
 
   private parseDurationFromSeconds(durationStr: string): number | undefined {
     const duration = parseFloat(durationStr);
     return isNaN(duration) ? undefined : Math.floor(duration);
+  }
+
+  private extractVideoId(url: string): string {
+    const match = url.match(
+      /(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/
+    );
+    return match && match[1] ? match[1] : "unknown";
   }
 }
