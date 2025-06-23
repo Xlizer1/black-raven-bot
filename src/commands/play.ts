@@ -27,222 +27,165 @@ export class PlayCommand extends Command {
     registry.registerChatInputCommand((builder) =>
       builder
         .setName("play")
-        .setDescription("Play music from various platforms")
-        .addStringOption(
-          (option) =>
-            option
-              .setName("query")
-              .setDescription("Song name, YouTube URL, or Spotify URL")
-              .setRequired(true)
-              .setAutocomplete(true) // Enable autocomplete
-        )
+        .setDescription("Play music from URLs or search YouTube")
         .addStringOption((option) =>
           option
-            .setName("platform")
-            .setDescription("Choose platform to search on")
-            .addChoices(
-              { name: "YouTube", value: "youtube" },
-              { name: "Spotify", value: "spotify" }
-            )
-            .setRequired(false)
+            .setName("query")
+            .setDescription("Song name, YouTube URL, or Spotify URL")
+            .setRequired(true)
         )
     );
   }
 
-  // Enhanced Autocomplete handler
-  public override async autocompleteRun(
-    interaction: Command.AutocompleteInteraction
+  public override async chatInputRun(
+    interaction: Command.ChatInputCommandInteraction
   ) {
-    try {
-      const focusedOption = interaction.options.getFocused(true);
+    // Check if user is in a voice channel
+    const member = interaction.member as GuildMember;
+    const voiceChannel = member?.voice?.channel;
 
-      // Only provide autocomplete for the query option
-      if (focusedOption.name !== "query") {
-        return interaction.respond([]);
-      }
-
-      const query = focusedOption.value as string;
-
-      // Don't search if query is too short or empty
-      if (!query || query.trim().length < 2) {
-        return interaction.respond([]);
-      }
-
-      const trimmedQuery = query.trim();
-
-      // If it's already a URL, don't provide autocomplete
-      if (this.isValidUrl(trimmedQuery)) {
-        return interaction.respond([
-          {
-            name: `🔗 ${
-              trimmedQuery.length > 80
-                ? trimmedQuery.substring(0, 77) + "..."
-                : trimmedQuery
-            }`,
-            value: trimmedQuery,
-          },
-        ]);
-      }
-
-      // Get platform preference
-      const platformChoice = interaction.options.getString(
-        "platform"
-      ) as MusicPlatform;
-      const targetPlatform = platformChoice || MusicPlatform.YOUTUBE;
-
-      // Create a defensive search with multiple fallbacks
-      const searchResults = await this.performDefensiveAutocompleteSearch(
-        trimmedQuery,
-        targetPlatform
-      );
-
-      // Convert results to autocomplete choices
-      const choices = this.formatAutocompleteChoices(
-        searchResults,
-        trimmedQuery
-      );
-
-      // Always respond, even if empty
-      await interaction.respond(choices);
-    } catch (error) {
-      console.error("Autocomplete error:", error);
-      // Emergency fallback - always respond to prevent Discord errors
-      try {
-        await interaction.respond([
-          {
-            name: "🔍 Search on YouTube...",
-            value: interaction.options.getFocused() || "search",
-          },
-        ]);
-      } catch (responseError) {
-        console.error("Failed emergency autocomplete response:", responseError);
-      }
-    }
-  }
-
-  private async performDefensiveAutocompleteSearch(
-    query: string,
-    platform: MusicPlatform
-  ): Promise<VideoInfo[]> {
-    try {
-      // Primary search attempt
-      const results = await Promise.race([
-        MusicService.searchForAutocomplete(query, platform, 6),
-        new Promise<VideoInfo[]>(
-          (resolve) => setTimeout(() => resolve([]), 1200) // 1.2s timeout
-        ),
-      ]);
-
-      return results || [];
-    } catch (error) {
-      console.warn(`Primary autocomplete search failed for "${query}":`, error);
-      return [];
-    }
-  }
-
-  private formatAutocompleteChoices(
-    results: VideoInfo[],
-    originalQuery: string
-  ): Array<{ name: string; value: string }> {
-    const choices: Array<{ name: string; value: string }> = [];
-
-    // Process results
-    for (const result of results.slice(0, 20)) {
-      try {
-        // Handle suggestion-based results differently
-        if (result.url.startsWith("search:")) {
-          // This is a suggestion, format it nicely
-          let displayName = result.title;
-
-          // Add artist if available
-          if (result.artist) {
-            displayName = `${result.artist} - ${displayName}`;
-          }
-
-          // Add search icon for suggestions
-          displayName = `🔍 ${displayName}`;
-
-          // Ensure proper length
-          if (displayName.length > 95) {
-            displayName = displayName.substring(0, 92) + "...";
-          }
-
-          choices.push({
-            name: displayName,
-            value: result.url, // This will be "search:query"
-          });
-        } else {
-          // This is a real video result, format normally
-          let displayName = result.title || "Unknown";
-
-          // Add artist if available and different from title
-          if (
-            result.artist &&
-            result.artist !== result.title &&
-            result.artist.length < 40 &&
-            !displayName.toLowerCase().includes(result.artist.toLowerCase())
-          ) {
-            displayName = `${result.artist} - ${displayName}`;
-          }
-
-          // Add platform emoji
-          const platformEmoji = this.getPlatformEmoji(result.platform);
-          displayName = `${platformEmoji} ${displayName}`;
-
-          // Add duration if available and reasonable
-          if (
-            result.duration &&
-            result.duration > 0 &&
-            result.duration < 7200
-          ) {
-            const duration = this.formatDuration(result.duration);
-            displayName = `${displayName} (${duration})`;
-          }
-
-          // Ensure proper length
-          if (displayName.length > 95) {
-            displayName = displayName.substring(0, 92) + "...";
-          }
-
-          // Use title as value
-          let value = result.title || originalQuery;
-          if (value.length > 100) {
-            value = value.substring(0, 100);
-          }
-
-          choices.push({
-            name: displayName,
-            value: value,
-          });
-        }
-      } catch (error) {
-        console.warn("Error formatting autocomplete choice:", error);
-        continue;
-      }
-    }
-
-    // If no results found, provide helpful options
-    if (choices.length === 0) {
-      const truncatedQuery =
-        originalQuery.length > 50
-          ? originalQuery.substring(0, 47) + "..."
-          : originalQuery;
-
-      choices.push({
-        name: `🔍 Search for "${truncatedQuery}"`,
-        value: originalQuery,
+    if (!voiceChannel) {
+      return interaction.reply({
+        content: "❌ You need to be in a voice channel to play music!",
+        flags: MessageFlags.Ephemeral,
       });
     }
 
-    return choices.slice(0, 25); // Discord's maximum
-  }
+    if (!interaction.guild) {
+      return interaction.reply({
+        content: "❌ This command can only be used in a server!",
+        flags: MessageFlags.Ephemeral,
+      });
+    }
 
-  private isValidUrl(input: string): boolean {
+    const query = interaction.options.getString("query", true);
+
+    await interaction.deferReply();
+
     try {
-      const url = new URL(input);
-      return url.protocol === "http:" || url.protocol === "https:";
-    } catch {
-      return false;
+      const queue = MusicQueue.getQueue(interaction.guild.id);
+      let trackInfo: VideoInfo | null = null;
+
+      // Check if input is a URL or text search
+      if (MusicService.isUrl(query)) {
+        // Handle URL input (existing logic)
+        const detectedPlatform = MusicService.detectPlatform(query);
+        if (!detectedPlatform) {
+          return interaction.editReply({
+            content:
+              "❌ **Unsupported URL!**\n\n" +
+              "Supported platforms:\n" +
+              "📺 **YouTube**: youtube.com or youtu.be URLs\n" +
+              "🟢 **Spotify**: open.spotify.com URLs\n\n" +
+              "💡 Make sure you're using a direct link to a song or video",
+          });
+        }
+
+        logger.info(`Processing ${detectedPlatform} URL: ${query}`);
+        trackInfo = await MusicService.getTrackInfo(query);
+
+        if (!trackInfo) {
+          const platformEmoji = this.getPlatformEmoji(detectedPlatform);
+          return interaction.editReply(
+            `❌ **Could not load ${detectedPlatform} content!**\n\n` +
+              `${platformEmoji} **URL**: ${query}\n\n` +
+              "This could happen if:\n" +
+              "• The video/track is private or deleted\n" +
+              "• The content is region-locked\n" +
+              "• The URL is malformed\n" +
+              "• The platform is temporarily unavailable\n\n" +
+              "💡 Try a different URL or check if the content is accessible"
+          );
+        }
+      } else {
+        // Handle text search (YouTube only)
+        logger.info(`Searching YouTube for: "${query}"`);
+
+        // Search YouTube for the text query
+        const searchResults = await MusicService.search(
+          query,
+          MusicPlatform.YOUTUBE,
+          {
+            limit: 1,
+          }
+        );
+
+        if (searchResults.length === 0 || !searchResults[0]) {
+          return interaction.editReply({
+            content:
+              `❌ **No results found on YouTube!**\n\n` +
+              `🔍 **Searched for**: "${query}"\n\n` +
+              "💡 **Try:**\n" +
+              "• Different search terms\n" +
+              "• More specific song/artist names\n" +
+              "• A direct YouTube or Spotify URL instead",
+          });
+        }
+
+        trackInfo = searchResults[0];
+      }
+
+      if (!trackInfo) {
+        return interaction.editReply("❌ Failed to get track information!");
+      }
+
+      // Show detected song info immediately
+      const platformEmoji = this.getPlatformEmoji(trackInfo.platform);
+      const artist = trackInfo.artist ? ` - ${trackInfo.artist}` : "";
+      const duration = trackInfo.duration
+        ? ` (${this.formatDuration(trackInfo.duration)})`
+        : "";
+
+      await interaction.editReply({
+        content:
+          `🎵 **Detected song:**\n\n` +
+          `${platformEmoji} **${trackInfo.title}**${artist}${duration}\n` +
+          `🎯 **Platform:** ${
+            trackInfo.platform.charAt(0).toUpperCase() +
+            trackInfo.platform.slice(1)
+          }\n\n` +
+          `⏳ Processing...`,
+      });
+
+      // Add to queue
+      const queueItem = queue.add({
+        ...trackInfo,
+        requestedBy: interaction.user.id,
+      });
+
+      // If nothing is playing, start playing
+      if (!queue.getIsPlaying()) {
+        await this.playNext(queue, voiceChannel, interaction);
+      } else {
+        // Just notify about queue addition
+        const position = queue.size();
+        const platformEmoji = this.getPlatformEmoji(trackInfo.platform);
+        const duration = trackInfo.duration
+          ? ` (${this.formatDuration(trackInfo.duration)})`
+          : "";
+        const artist = trackInfo.artist ? ` - ${trackInfo.artist}` : "";
+
+        return interaction.editReply({
+          content:
+            `➕ **Added to queue:**\n\n` +
+            `${platformEmoji} **${trackInfo.title}**${artist}${duration}\n` +
+            `📍 **Position:** ${position}\n` +
+            `🎵 **Platform:** ${
+              trackInfo.platform.charAt(0).toUpperCase() +
+              trackInfo.platform.slice(1)
+            }\n` +
+            `👤 **Requested by:** <@${interaction.user.id}>\n\n` +
+            `📋 **Queue:** ${queue.size()} song${
+              queue.size() === 1 ? "" : "s"
+            } total`,
+        });
+      }
+    } catch (error) {
+      logger.error("Play command error:", error);
+      return interaction.editReply(
+        "❌ **An error occurred while processing the URL!**\n\n" +
+          "Please try again, or use a different URL if the problem persists."
+      );
     }
   }
 
@@ -273,102 +216,6 @@ export class PlayCommand extends Command {
     }
   }
 
-  public override async chatInputRun(
-    interaction: Command.ChatInputCommandInteraction
-  ) {
-    // Check if user is in a voice channel
-    const member = interaction.member as GuildMember;
-    const voiceChannel = member?.voice?.channel;
-
-    if (!voiceChannel) {
-      return interaction.reply({
-        content: "❌ You need to be in a voice channel to play music!",
-        flags: MessageFlags.Ephemeral,
-      });
-    }
-
-    if (!interaction.guild) {
-      return interaction.reply({
-        content: "❌ This command can only be used in a server!",
-        flags: MessageFlags.Ephemeral,
-      });
-    }
-
-    let query = interaction.options.getString("query", true);
-    const platformChoice = interaction.options.getString(
-      "platform"
-    ) as MusicPlatform;
-
-    await interaction.deferReply();
-
-    try {
-      const queue = MusicQueue.getQueue(interaction.guild.id);
-
-      // Handle suggestion-based queries (from autocomplete)
-      if (query.startsWith("search:")) {
-        query = query.replace("search:", "");
-        logger.info(`Processing suggestion-based search: ${query}`);
-      }
-
-      // Detect platform or use user choice
-      const detectedPlatform = MusicService.detectPlatform(query);
-      const targetPlatform =
-        platformChoice || detectedPlatform || MusicPlatform.YOUTUBE;
-
-      logger.info(`Processing ${targetPlatform} request: ${query}`);
-
-      // Get track info
-      let trackInfo;
-      if (MusicService.isUrl(query) && !query.startsWith("search:")) {
-        trackInfo = await MusicService.getTrackInfo(query);
-      } else {
-        // For suggestions or regular text queries, do a proper search
-        const searchResults = await MusicService.search(query, targetPlatform, {
-          limit: 1,
-        });
-        trackInfo = searchResults[0] || null;
-      }
-
-      if (!trackInfo) {
-        return interaction.editReply(
-          `❌ Couldn't find "${query}"! Try a different search term.`
-        );
-      }
-
-      // Add to queue
-      const queueItem = queue.add({
-        ...trackInfo,
-        requestedBy: interaction.user.id,
-      });
-
-      // If nothing is playing, start playing
-      if (!queue.getIsPlaying()) {
-        await this.playNext(queue, voiceChannel, interaction);
-      } else {
-        // Just notify about queue addition
-        const position = queue.size();
-        const platformEmoji = this.getPlatformEmoji(trackInfo.platform);
-        const duration = trackInfo.duration
-          ? ` (${this.formatDuration(trackInfo.duration)})`
-          : "";
-
-        return interaction.editReply({
-          content:
-            `➕ **Added to queue:**\n` +
-            `${platformEmoji} **${trackInfo.title}**${duration}\n` +
-            `📍 Position: ${position}\n` +
-            `🎵 Platform: ${trackInfo.platform}\n` +
-            `👤 Requested by: <@${interaction.user.id}>`,
-        });
-      }
-    } catch (error) {
-      logger.error("Play command error:", error);
-      return interaction.editReply(
-        "❌ An error occurred while trying to play the song!"
-      );
-    }
-  }
-
   private async playNext(
     queue: MusicQueue,
     voiceChannel: any,
@@ -388,6 +235,14 @@ export class PlayCommand extends Command {
       const streamInfo = await MusicService.getStreamInfo(currentSong.url);
       if (!streamInfo) {
         logger.error(`Failed to get stream for: ${currentSong.title}`);
+
+        // Inform user about the failure
+        await interaction.editReply({
+          content:
+            `❌ **Failed to play:** ${currentSong.title}\n\n` +
+            "This content couldn't be streamed. Trying next song in queue...",
+        });
+
         return this.playNext(queue, voiceChannel, interaction);
       }
 
@@ -439,20 +294,33 @@ export class PlayCommand extends Command {
       const duration = currentSong.duration
         ? ` (${this.formatDuration(currentSong.duration)})`
         : "";
+      const artist = currentSong.artist ? ` - ${currentSong.artist}` : "";
 
       return interaction.editReply({
         content:
-          `${platformEmoji} **Now playing:**\n` +
-          `🎵 **${currentSong.title}**${duration}\n` +
-          `👤 Requested by: <@${currentSong.requestedBy}>` +
+          `${platformEmoji} **Now playing:**\n\n` +
+          `🎵 **${currentSong.title}**${artist}${duration}\n` +
+          `🎯 **Platform:** ${
+            currentSong.platform.charAt(0).toUpperCase() +
+            currentSong.platform.slice(1)
+          }\n` +
+          `👤 **Requested by:** <@${currentSong.requestedBy}>` +
           (queue.size() > 0
-            ? `\n📋 ${queue.size()} song${
+            ? `\n\n📋 **Queue:** ${queue.size()} song${
                 queue.size() === 1 ? "" : "s"
-              } in queue`
+              } remaining`
             : ""),
       });
     } catch (error) {
       logger.error("Playback error:", error);
+
+      // Inform user about the error
+      await interaction.editReply({
+        content:
+          `❌ **Playback error for:** ${currentSong.title}\n\n` +
+          "Trying next song in queue...",
+      });
+
       return this.playNext(queue, voiceChannel, interaction);
     }
   }

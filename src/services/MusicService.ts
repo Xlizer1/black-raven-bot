@@ -1,6 +1,4 @@
 import { MusicProviderFactory } from "./MusicProviderFactory";
-import { YouTubeProvider } from "./providers/YouTubeProvider";
-import { AutocompleteCache } from "./AutocompleteCache";
 import type {
   VideoInfo,
   StreamInfo,
@@ -10,7 +8,6 @@ import type {
 
 export class MusicService {
   private static factory = MusicProviderFactory.getInstance();
-  private static cache = AutocompleteCache.getInstance();
 
   static async search(
     query: string,
@@ -18,73 +15,6 @@ export class MusicService {
     options?: SearchOptions
   ): Promise<VideoInfo[]> {
     return this.factory.search(query, platform, options);
-  }
-
-  // Fast search specifically for autocomplete with caching
-  static async searchForAutocomplete(
-    query: string,
-    platform?: MusicPlatform,
-    limit: number = 8
-  ): Promise<VideoInfo[]> {
-    const targetPlatform = platform || "youtube";
-
-    try {
-      // Check cache first - this is crucial for performance
-      const cachedResults = this.cache.get(query, targetPlatform);
-      if (cachedResults) {
-        return cachedResults.slice(0, limit);
-      }
-
-      // Create multiple timeout layers for reliability
-      const searchPromise = async (): Promise<VideoInfo[]> => {
-        // For YouTube, use the ultra-fast optimized search
-        if (targetPlatform === "youtube") {
-          const youtubeProvider = this.factory.getProvider(
-            "youtube" as MusicPlatform
-          );
-          if (youtubeProvider && youtubeProvider instanceof YouTubeProvider) {
-            return await youtubeProvider.searchForAutocomplete(query, limit);
-          }
-        }
-        // For Spotify, use optimized search if available
-        else if (targetPlatform === "spotify") {
-          const spotifyProvider = this.factory.getProvider(
-            "spotify" as MusicPlatform
-          );
-          if (spotifyProvider && "searchForAutocomplete" in spotifyProvider) {
-            return await (spotifyProvider as any).searchForAutocomplete(
-              query,
-              limit
-            );
-          }
-        }
-
-        // Fallback - should rarely be reached
-        return await this.factory.search(query, platform as MusicPlatform, {
-          limit: Math.min(limit, 3),
-        });
-      };
-
-      // Race with timeout
-      const timeoutPromise = new Promise<VideoInfo[]>((resolve) => {
-        setTimeout(() => {
-          console.warn(`Autocomplete search timed out for: "${query}"`);
-          resolve([]);
-        }, 1500); // 1.5 second timeout
-      });
-
-      const results = await Promise.race([searchPromise(), timeoutPromise]);
-
-      // Cache successful results (only if we got some results and no timeout)
-      if (results.length > 0) {
-        this.cache.set(query, targetPlatform, results);
-      }
-
-      return results.slice(0, limit);
-    } catch (error) {
-      console.error("Autocomplete search error:", error);
-      return [];
-    }
   }
 
   static async getStreamInfo(input: string): Promise<StreamInfo | null> {
@@ -127,14 +57,5 @@ export class MusicService {
     } catch {
       return false;
     }
-  }
-
-  // Cache management methods
-  static clearAutocompleteCache(): void {
-    this.cache.clear();
-  }
-
-  static getAutocompleteCacheSize(): number {
-    return this.cache.size();
   }
 }

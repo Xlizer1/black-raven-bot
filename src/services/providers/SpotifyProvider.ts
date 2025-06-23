@@ -256,13 +256,7 @@ export class SpotifyProvider implements IMusicProvider {
 
       const youtubeTrack = youtubeResults[0];
 
-      // Verify it's a reasonable match (basic heuristic)
-      if (!this.isReasonableMatch(spotifyTrack, youtubeTrack)) {
-        logger.warn(`YouTube match quality low for: ${spotifyTrack.title}`);
-        // Still proceed but log the warning
-      }
-
-      // Get stream info from YouTube
+      // Get stream info from YouTube - no quality checking, just use the first result
       const streamInfo = await this.youtubeProvider.getStreamInfo(
         youtubeTrack.url
       );
@@ -299,69 +293,5 @@ export class SpotifyProvider implements IMusicProvider {
     }
 
     return cleanTitle;
-  }
-
-  private isReasonableMatch(
-    spotifyTrack: VideoInfo,
-    youtubeTrack: VideoInfo
-  ): boolean {
-    const spotifyTitle = spotifyTrack.title.toLowerCase();
-    const youtubeTitle = youtubeTrack.title.toLowerCase();
-    const spotifyArtist = (spotifyTrack.artist || "").toLowerCase();
-
-    // Check if YouTube title contains main elements from Spotify
-    const titleMatch = youtubeTitle.includes(
-      spotifyTitle.substring(0, Math.min(spotifyTitle.length, 20))
-    );
-    const artistMatch = spotifyArtist
-      ? youtubeTitle.includes(spotifyArtist.split(",")[0]?.trim() || "")
-      : true;
-
-    // Duration check (within 30 seconds)
-    const durationMatch =
-      !spotifyTrack.duration ||
-      !youtubeTrack.duration ||
-      Math.abs(spotifyTrack.duration - youtubeTrack.duration) <= 30;
-
-    return titleMatch && artistMatch && durationMatch;
-  }
-
-  async searchForAutocomplete(
-    query: string,
-    limit: number = 10
-  ): Promise<VideoInfo[]> {
-    try {
-      if (!this.isConfigured()) {
-        return [];
-      }
-
-      await this.ensureAuthenticated();
-
-      const searchUrl = new URL(`${SpotifyProvider.BASE_URL}/search`);
-      searchUrl.searchParams.set("q", query);
-      searchUrl.searchParams.set("type", "track");
-      searchUrl.searchParams.set("limit", Math.min(limit, 20).toString());
-
-      const response = await fetch(searchUrl.toString(), {
-        headers: {
-          Authorization: `Bearer ${this.accessToken}`,
-        },
-        signal: AbortSignal.timeout(2000), // 2 second timeout for autocomplete
-      });
-
-      if (!response.ok) {
-        return [];
-      }
-
-      const data = (await response.json()) as SpotifySearchResponse;
-      const tracks = data.tracks?.items || [];
-
-      return tracks
-        .slice(0, limit)
-        .map((track) => this.convertSpotifyTrackToVideoInfo(track));
-    } catch (error) {
-      logger.warn("Spotify autocomplete search error:", error);
-      return [];
-    }
   }
 }
