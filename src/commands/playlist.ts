@@ -3,6 +3,16 @@
 import { Command } from "@sapphire/framework";
 import { MessageFlags, EmbedBuilder } from "discord.js";
 import { GuildMember } from "discord.js";
+import {
+  joinVoiceChannel,
+  createAudioPlayer,
+  createAudioResource,
+  AudioPlayerStatus,
+  VoiceConnectionStatus,
+  entersState,
+  NoSubscriberBehavior,
+  StreamType,
+} from "@discordjs/voice";
 import { MusicService } from "../services/MusicService";
 import { MusicQueue } from "../services/MusicQueue";
 import { MusicPlatform } from "../services/providers/IMusicProvider";
@@ -160,8 +170,14 @@ export class PlaylistCommand extends Command {
       // Start playing if nothing is currently playing
       const wasEmpty = !queue.getIsPlaying() && !queue.getCurrentSong();
       if (wasEmpty && addedCount > 0) {
-        // The playNext logic should be called here
-        // This would be integrated with your existing play command logic
+        try {
+          await this.startPlayback(queue, voiceChannel, interaction);
+        } catch (error) {
+          logger.error(
+            "Failed to start playback after loading playlist:",
+            error
+          );
+        }
       }
 
       // Create success response
@@ -229,6 +245,89 @@ export class PlaylistCommand extends Command {
           "• The platform is temporarily unavailable\n\n" +
           "💡 Try again with a public playlist URL",
       });
+    }
+  }
+
+  private async startPlayback(
+    queue: MusicQueue,
+    voiceChannel: any,
+    interaction: any
+  ): Promise<void> {
+    const currentSong = queue.next();
+    if (!currentSong) {
+      queue.setPlaying(false);
+      return;
+    }
+
+    queue.setCurrentSong(currentSong);
+    queue.setPlaying(true);
+
+    try {
+      logger.info(`Starting playback: ${currentSong.title}`);
+
+      // Get stream info
+      const baseStreamInfo = await MusicService.getStreamInfo(currentSong.url);
+      if (!baseStreamInfo) {
+        logger.error(`Failed to get stream for: ${currentSong.title}`);
+        // Try next song
+        return this.startPlayback(queue, voiceChannel, interaction);
+      }
+
+      // Apply filters if any are active
+      const filteredStreamUrl = await queue.applyFiltersToStream(
+        baseStreamInfo.streamUrl
+      );
+      const finalStreamUrl = filteredStreamUrl || baseStreamInfo.streamUrl;
+
+      // Join voice channel if not connected
+      let connection = queue.getConnection();
+      if (!connection) {
+        connection = joinVoiceChannel({
+          channelId: voiceChannel.id,
+          guildId: interaction.guild!.id,
+          adapterCreator: interaction.guild!.voiceAdapterCreator as any,
+        });
+        queue.setConnection(connection);
+        await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+      }
+
+      // Create audio resource
+      const resource = createAudioResource(finalStreamUrl, {
+        inputType: StreamType.Arbitrary,
+      });
+
+      // Create player if needed
+      let player = queue.getPlayer();
+      if (!player) {
+        player = createAudioPlayer({
+          behaviors: {
+            noSubscriber: NoSubscriberBehavior.Play,
+          },
+        });
+        queue.setPlayer(player);
+
+        // Set up player events
+        player.on(AudioPlayerStatus.Idle, () => {
+          logger.info("Song finished, playing next");
+          this.startPlayback(queue, voiceChannel, interaction);
+        });
+
+        player.on("error", (error) => {
+          logger.error("Audio player error:", error);
+          this.startPlayback(queue, voiceChannel, interaction);
+        });
+
+        connection.subscribe(player);
+      }
+
+      // Play the audio
+      player.play(resource);
+
+      logger.info(`Now playing: ${currentSong.title} from playlist`);
+    } catch (error) {
+      logger.error("Playback error:", error);
+      // Try next song
+      return this.startPlayback(queue, voiceChannel, interaction);
     }
   }
 
