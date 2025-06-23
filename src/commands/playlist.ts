@@ -1,9 +1,12 @@
+// src/commands/playlist.ts
+
 import { Command } from "@sapphire/framework";
 import { MessageFlags, EmbedBuilder } from "discord.js";
 import { GuildMember } from "discord.js";
 import { MusicService } from "../services/MusicService";
 import { MusicQueue } from "../services/MusicQueue";
 import { MusicPlatform } from "../services/providers/IMusicProvider";
+import { SpotifyProvider } from "../services/providers/SpotifyProvider";
 import { logger } from "../utils/logger";
 
 export class PlaylistCommand extends Command {
@@ -222,7 +225,7 @@ export class PlaylistCommand extends Command {
           "This could happen if:\n" +
           "• The playlist is private or deleted\n" +
           "• The URL is invalid\n" +
-          "• There's a network error\n" +
+          "• There was a network error\n" +
           "• The platform is temporarily unavailable\n\n" +
           "💡 Try again with a public playlist URL",
       });
@@ -301,19 +304,9 @@ export class PlaylistCommand extends Command {
     description?: string;
   } | null> {
     try {
-      // Extract playlist ID from URL
-      const match = url.match(/playlist\/([a-zA-Z0-9]+)/);
-      if (!match) return null;
-
-      const playlistId = match[1];
-
-      // This would require Spotify API integration
-      // For now, return mock data
-      return {
-        title: "Spotify Playlist",
-        songCount: 0,
-        description: "Spotify playlist loading not fully implemented",
-      };
+      // Use the Spotify provider's new method
+      const spotifyProvider = new SpotifyProvider();
+      return await spotifyProvider.getPlaylistInfo(url);
     } catch (error) {
       logger.error("Error getting Spotify playlist info:", error);
       return null;
@@ -388,10 +381,9 @@ export class PlaylistCommand extends Command {
     limit: number
   ): Promise<any[]> {
     try {
-      // This would require full Spotify API integration
-      // For now, return empty array
-      logger.warn("Spotify playlist loading not fully implemented");
-      return [];
+      // Use the Spotify provider's new method
+      const spotifyProvider = new SpotifyProvider();
+      return await spotifyProvider.loadPlaylistSongs(url, limit);
     } catch (error) {
       logger.error("Error loading Spotify playlist songs:", error);
       return [];

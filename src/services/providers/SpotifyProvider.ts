@@ -23,6 +23,22 @@ interface SpotifyTrack {
   };
 }
 
+interface SpotifyPlaylist {
+  id: string;
+  name: string;
+  description: string;
+  tracks: {
+    total: number;
+    items: Array<{
+      track: SpotifyTrack;
+    }>;
+  };
+  external_urls: {
+    spotify: string;
+  };
+  images: Array<{ url: string }>;
+}
+
 interface SpotifySearchResponse {
   tracks: {
     items: SpotifyTrack[];
@@ -41,6 +57,9 @@ export class SpotifyProvider implements IMusicProvider {
   private static readonly URL_REGEX =
     /^https:\/\/open\.spotify\.com\/(track|album|playlist)\/([a-zA-Z0-9]+)/;
 
+  private static readonly PLAYLIST_REGEX =
+    /^https:\/\/open\.spotify\.com\/playlist\/([a-zA-Z0-9]+)/;
+
   private static readonly BASE_URL = "https://api.spotify.com/v1";
   private static readonly AUTH_URL = "https://accounts.spotify.com/api/token";
 
@@ -54,6 +73,11 @@ export class SpotifyProvider implements IMusicProvider {
 
   validateUrl(url: string): boolean {
     return SpotifyProvider.URL_REGEX.test(url);
+  }
+
+  // Check if URL is specifically a playlist
+  isPlaylistUrl(url: string): boolean {
+    return SpotifyProvider.PLAYLIST_REGEX.test(url);
   }
 
   async search(
@@ -162,6 +186,132 @@ export class SpotifyProvider implements IMusicProvider {
     }
   }
 
+  // NEW: Playlist functionality
+  async getPlaylistInfo(url: string): Promise<{
+    title: string;
+    songCount: number;
+    description?: string;
+  } | null> {
+    try {
+      const playlistId = this.extractPlaylistId(url);
+      if (!playlistId) {
+        logger.error("Could not extract playlist ID from Spotify URL:", url);
+        return null;
+      }
+
+      if (!this.isConfigured()) {
+        logger.warn("Spotify API not configured, cannot get playlist info");
+        return null;
+      }
+
+      await this.ensureAuthenticated();
+
+      const response: any = await fetch(
+        `${SpotifyProvider.BASE_URL}/playlists/${playlistId}?fields=name,description,tracks.total`,
+        {
+          headers: {
+            Authorization: `Bearer ${this.accessToken}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        logger.error(
+          `Spotify playlist info failed: ${response.status} ${response.statusText}`
+        );
+        return null;
+      }
+
+      const playlist = await response.json();
+      return {
+        title: playlist.name || "Unknown Playlist",
+        songCount: playlist.tracks?.total || 0,
+        description: playlist.description || undefined,
+      };
+    } catch (error) {
+      logger.error("Spotify playlist info error:", error);
+      return null;
+    }
+  }
+
+  async loadPlaylistSongs(
+    url: string,
+    limit: number = 50
+  ): Promise<VideoInfo[]> {
+    try {
+      const playlistId = this.extractPlaylistId(url);
+      if (!playlistId) {
+        logger.error("Could not extract playlist ID from Spotify URL:", url);
+        return [];
+      }
+
+      if (!this.isConfigured()) {
+        logger.warn("Spotify API not configured, cannot load playlist");
+        return [];
+      }
+
+      await this.ensureAuthenticated();
+
+      const results: VideoInfo[] = [];
+      let offset = 0;
+      const batchSize = 50; // Spotify API limit per request
+
+      while (results.length < limit) {
+        const currentLimit = Math.min(batchSize, limit - results.length);
+
+        const response = await fetch(
+          `${SpotifyProvider.BASE_URL}/playlists/${playlistId}/tracks?limit=${currentLimit}&offset=${offset}&fields=items.track(id,name,artists,album,duration_ms,external_urls)`,
+          {
+            headers: {
+              Authorization: `Bearer ${this.accessToken}`,
+            },
+          }
+        );
+
+        if (!response.ok) {
+          logger.error(
+            `Spotify playlist tracks failed: ${response.status} ${response.statusText}`
+          );
+          break;
+        }
+
+        const data: any = await response.json();
+        const tracks = data.items || [];
+
+        if (tracks.length === 0) {
+          break; // No more tracks
+        }
+
+        for (const item of tracks) {
+          if (item.track && results.length < limit) {
+            try {
+              const videoInfo = this.convertSpotifyTrackToVideoInfo(item.track);
+              results.push(videoInfo);
+            } catch (error) {
+              logger.warn(
+                `Failed to convert track: ${item.track?.name}`,
+                error
+              );
+            }
+          }
+        }
+
+        offset += tracks.length;
+
+        // If we got fewer tracks than requested, we've reached the end
+        if (tracks.length < currentLimit) {
+          break;
+        }
+      }
+
+      logger.info(`Loaded ${results.length} tracks from Spotify playlist`);
+      return results;
+    } catch (error) {
+      logger.error("Spotify playlist loading error:", error);
+      return [];
+    }
+  }
+
   supportsPlaylists(): boolean {
     return true;
   }
@@ -220,6 +370,14 @@ export class SpotifyProvider implements IMusicProvider {
     return null;
   }
 
+  private extractPlaylistId(url: string): string | null {
+    const match = url.match(SpotifyProvider.PLAYLIST_REGEX);
+    if (match && match[1]) {
+      return match[1];
+    }
+    return null;
+  }
+
   private convertSpotifyTrackToVideoInfo(track: SpotifyTrack): VideoInfo {
     const artists = track.artists.map((artist) => artist.name).join(", ");
     const thumbnail = track.album.images[0]?.url;
@@ -256,7 +414,7 @@ export class SpotifyProvider implements IMusicProvider {
 
       const youtubeTrack = youtubeResults[0];
 
-      // Get stream info from YouTube - no quality checking, just use the first result
+      // Get stream info from YouTube
       const streamInfo = await this.youtubeProvider.getStreamInfo(
         youtubeTrack.url
       );

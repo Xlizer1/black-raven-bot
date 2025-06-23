@@ -1,3 +1,5 @@
+// src/services/MusicQueue.ts
+
 import { VoiceConnection, AudioPlayer } from "@discordjs/voice";
 import type { VideoInfo } from "./providers/IMusicProvider";
 import { logger } from "../utils/logger";
@@ -33,6 +35,7 @@ export class MusicQueue {
   private volume: number = 1.0;
   private history: QueueItem[] = [];
   private autoLeaveTimeout: NodeJS.Timeout | null = null;
+  private is24x7Enabled: boolean = false;
 
   // Audio filters integration
   private activeFilters: Record<keyof AudioFilters, string> = {
@@ -196,7 +199,9 @@ export class MusicQueue {
     if (playing) {
       this.clearAutoLeaveTimer();
     } else {
-      this.startAutoLeaveTimer();
+      if (!this.is24x7Enabled) {
+        this.startAutoLeaveTimer();
+      }
     }
   }
 
@@ -272,8 +277,30 @@ export class MusicQueue {
     return [...this.history];
   }
 
-  // AUTO-LEAVE METHODS
+  // 24/7 MODE METHODS
+  set24x7(enabled: boolean): void {
+    this.is24x7Enabled = enabled;
+    if (enabled) {
+      this.clearAutoLeaveTimer();
+      logger.info(`24/7 mode enabled for guild: ${this.guildId}`);
+    } else {
+      if (!this.isPlaying && this.queue.length === 0) {
+        this.startAutoLeaveTimer();
+      }
+      logger.info(`24/7 mode disabled for guild: ${this.guildId}`);
+    }
+  }
+
+  get24x7(): boolean {
+    return this.is24x7Enabled;
+  }
+
+  // AUTO-LEAVE METHODS (enhanced to handle 24/7 mode)
   startAutoLeaveTimer(): void {
+    if (this.is24x7Enabled) {
+      return; // Don't start timer if 24/7 mode is enabled
+    }
+
     this.clearAutoLeaveTimer();
     this.autoLeaveTimeout = setTimeout(() => {
       if (this.connection && this.queue.length === 0 && !this.isPlaying) {
@@ -346,6 +373,27 @@ export class MusicQueue {
       logger.error("Error applying filters to stream:", error);
       return streamUrl; // Return original stream if filtering fails
     }
+  }
+
+  // STATUS METHODS
+  getStatus(): {
+    alwaysOn: boolean;
+    autoPlay: boolean;
+    repeatMode: RepeatMode;
+    volume: number;
+    isPlaying: boolean;
+    queueSize: number;
+    currentSong: QueueItem | null;
+  } {
+    return {
+      alwaysOn: this.is24x7Enabled,
+      autoPlay: this.isAutoPlayEnabled(),
+      repeatMode: this.repeatMode,
+      volume: this.volume,
+      isPlaying: this.isPlaying,
+      queueSize: this.queue.length,
+      currentSong: this.currentSong,
+    };
   }
 
   // AUTOPLAY METHODS

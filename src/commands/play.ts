@@ -119,7 +119,25 @@ export class PlayCommand extends Command {
       if (!trackInfo) {
         // Check if input is a URL or text search
         if (MusicService.isUrl(query)) {
-          // Handle URL input (existing logic)
+          // NEW: Check if it's a playlist URL
+          if (this.isPlaylistUrl(query)) {
+            const platform = this.getPlaylistPlatform(query);
+            return interaction.editReply({
+              content:
+                `🎵 **${platform} Playlist Detected!**\n\n` +
+                `📋 **URL**: ${query}\n\n` +
+                `💡 **Use the playlist command instead:**\n` +
+                `\`/playlist url:${query}\`\n\n` +
+                `**Playlist command features:**\n` +
+                `• Load multiple songs at once\n` +
+                `• Shuffle option available\n` +
+                `• Set max number of songs to load\n` +
+                `• Better handling of large playlists\n\n` +
+                `⚠️ The \`/play\` command is designed for individual tracks only.`,
+            });
+          }
+
+          // Continue with existing single track logic...
           const detectedPlatform = MusicService.detectPlatform(query);
           if (!detectedPlatform) {
             return interaction.editReply({
@@ -188,8 +206,8 @@ export class PlayCommand extends Command {
         ? ` (${this.formatDuration(trackInfo.duration)})`
         : "";
 
-      // Check if filters are active
-      const activeFilters = queue.getActiveFilters();
+      // Check if filters are active - FIXED: use getEnabledFilters() instead of getActiveFilters()
+      const activeFilters = queue.getEnabledFilters();
       const filterText =
         activeFilters.length > 0
           ? `\n🎛️ **Active filters:** ${activeFilters.join(", ")}`
@@ -280,7 +298,7 @@ export class PlayCommand extends Command {
     voiceChannel: any,
     interaction: any
   ): Promise<void> {
-    const currentSong = await queue.next(); // Use await since next() now returns a promise
+    const currentSong = queue.next(); // FIXED: Remove await since next() returns QueueItem | null, not Promise
     if (!currentSong) {
       queue.setPlaying(false);
       return;
@@ -305,11 +323,11 @@ export class PlayCommand extends Command {
         return this.playNext(queue, voiceChannel, interaction);
       }
 
-      // Apply filters if any are active
-      const filteredStreamUrl = await queue.getFilteredStream(
-        currentSong,
+      // Apply filters if any are active - FIXED: Handle null return value
+      const filteredStreamUrl = await queue.applyFiltersToStream(
         baseStreamInfo.streamUrl
       );
+      const finalStreamUrl = filteredStreamUrl || baseStreamInfo.streamUrl; // Fallback to original if null
 
       // Join voice channel if not connected
       let connection = queue.getConnection();
@@ -323,8 +341,8 @@ export class PlayCommand extends Command {
         await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
       }
 
-      // Create audio resource with filtered stream
-      const resource = createAudioResource(filteredStreamUrl, {
+      // Create audio resource with filtered stream - FIXED: Use finalStreamUrl which is guaranteed to be string
+      const resource = createAudioResource(finalStreamUrl, {
         inputType: StreamType.Arbitrary,
       });
 
@@ -361,8 +379,8 @@ export class PlayCommand extends Command {
         : "";
       const artist = currentSong.artist ? ` - ${currentSong.artist}` : "";
 
-      // Show active filters in now playing message
-      const activeFilters = queue.getActiveFilters();
+      // Show active filters in now playing message - FIXED: use getEnabledFilters() instead of getActiveFilters()
+      const activeFilters = queue.getEnabledFilters();
       const filterText =
         activeFilters.length > 0
           ? `\n🎛️ **Filters:** ${activeFilters.join(", ")}`
@@ -403,5 +421,23 @@ export class PlayCommand extends Command {
 
       return this.playNext(queue, voiceChannel, interaction);
     }
+  }
+
+  private isPlaylistUrl(url: string): boolean {
+    const youtubePlaylistRegex =
+      /^https?:\/\/(www\.)?(youtube\.com\/playlist\?list=|youtu\.be\/playlist\?list=)[\w-]+/;
+    const spotifyPlaylistRegex =
+      /^https?:\/\/open\.spotify\.com\/playlist\/[\w]+/;
+
+    return youtubePlaylistRegex.test(url) || spotifyPlaylistRegex.test(url);
+  }
+
+  private getPlaylistPlatform(url: string): string {
+    if (url.includes("spotify.com")) {
+      return "Spotify";
+    } else if (url.includes("youtube.com") || url.includes("youtu.be")) {
+      return "YouTube";
+    }
+    return "Unknown";
   }
 }
