@@ -1,6 +1,12 @@
 import { VoiceConnection, AudioPlayer } from "@discordjs/voice";
 import type { VideoInfo } from "./providers/IMusicProvider";
 import { logger } from "../utils/logger";
+import {
+  AudioFilterService,
+  type AudioFilters,
+  DEFAULT_FILTERS,
+} from "./AudioFilterService";
+import { AutoPlayService } from "./AutoPlayService";
 
 export interface QueueItem extends VideoInfo {
   requestedBy: string; // User ID
@@ -22,13 +28,24 @@ export class MusicQueue {
   private connection: VoiceConnection | null = null;
   private player: AudioPlayer | null = null;
 
-  // New properties
+  // Enhanced properties
   private repeatMode: RepeatMode = RepeatMode.OFF;
   private volume: number = 1.0;
   private history: QueueItem[] = [];
   private autoLeaveTimeout: NodeJS.Timeout | null = null;
 
-  private constructor(private guildId: string) {}
+  // Audio filters integration
+  private activeFilters: Record<keyof AudioFilters, string> = {
+    ...DEFAULT_FILTERS,
+  };
+  private enabledFilters: Set<keyof AudioFilters> = new Set();
+  private audioFilterService: AudioFilterService;
+  private autoPlayService: AutoPlayService;
+
+  private constructor(private guildId: string) {
+    this.audioFilterService = AudioFilterService.getInstance();
+    this.autoPlayService = AutoPlayService.getInstance();
+  }
 
   static getQueue(guildId: string): MusicQueue {
     if (!this.instances.has(guildId)) {
@@ -53,6 +70,12 @@ export class MusicQueue {
     };
 
     this.queue.push(queueItem);
+
+    // Trigger autoplay check if enabled
+    this.autoPlayService.checkAndAddSongs(this.guildId).catch((error) => {
+      logger.warn("AutoPlay check failed:", error);
+    });
+
     return queueItem;
   }
 
@@ -91,6 +114,13 @@ export class MusicQueue {
       return this.queue.shift() || null;
     }
 
+    // Trigger autoplay if queue is getting low
+    if (this.queue.length <= 2) {
+      this.autoPlayService.checkAndAddSongs(this.guildId).catch((error) => {
+        logger.warn("AutoPlay check failed:", error);
+      });
+    }
+
     return nextItem || null;
   }
 
@@ -105,6 +135,12 @@ export class MusicQueue {
     this.currentSong = null;
     this.isPlaying = false;
     this.clearAutoLeaveTimer();
+
+    // Clear audio filters
+    this.enabledFilters.clear();
+    this.audioFilterService.removeFilters(this.guildId).catch((error) => {
+      logger.warn("Failed to clear audio filters:", error);
+    });
 
     if (this.connection) {
       this.connection.destroy();
@@ -176,7 +212,7 @@ export class MusicQueue {
     return this.queue.length;
   }
 
-  // NEW METHODS FOR QUEUE MANIPULATION
+  // QUEUE MANIPULATION METHODS
   clearQueue(): void {
     this.queue.length = 0;
   }
@@ -205,7 +241,7 @@ export class MusicQueue {
     return false;
   }
 
-  // NEW METHODS FOR REPEAT MODE
+  // REPEAT MODE METHODS
   setRepeatMode(mode: RepeatMode): void {
     this.repeatMode = mode;
   }
@@ -214,7 +250,7 @@ export class MusicQueue {
     return this.repeatMode;
   }
 
-  // NEW METHODS FOR VOLUME
+  // VOLUME METHODS
   setVolume(volume: number): void {
     this.volume = Math.max(0, Math.min(1, volume));
   }
@@ -223,7 +259,7 @@ export class MusicQueue {
     return this.volume;
   }
 
-  // NEW METHODS FOR HISTORY
+  // HISTORY METHODS
   addToHistory(item: QueueItem): void {
     this.history.unshift(item);
     // Keep only last 50 songs in history
@@ -236,7 +272,7 @@ export class MusicQueue {
     return [...this.history];
   }
 
-  // NEW METHODS FOR AUTO-LEAVE
+  // AUTO-LEAVE METHODS
   startAutoLeaveTimer(): void {
     this.clearAutoLeaveTimer();
     this.autoLeaveTimeout = setTimeout(() => {
@@ -255,5 +291,77 @@ export class MusicQueue {
       clearTimeout(this.autoLeaveTimeout);
       this.autoLeaveTimeout = null;
     }
+  }
+
+  // AUDIO FILTERS METHODS
+  async enableFilter(filter: keyof AudioFilters): Promise<boolean> {
+    try {
+      if (await this.audioFilterService.validateFilter(filter)) {
+        this.enabledFilters.add(filter);
+        return true;
+      }
+      return false;
+    } catch (error) {
+      logger.error(`Error enabling filter ${filter}:`, error);
+      return false;
+    }
+  }
+
+  async disableFilter(filter: keyof AudioFilters): Promise<boolean> {
+    try {
+      this.enabledFilters.delete(filter);
+      return true;
+    } catch (error) {
+      logger.error(`Error disabling filter ${filter}:`, error);
+      return false;
+    }
+  }
+
+  getEnabledFilters(): (keyof AudioFilters)[] {
+    return Array.from(this.enabledFilters);
+  }
+
+  async clearAllFilters(): Promise<void> {
+    try {
+      this.enabledFilters.clear();
+      await this.audioFilterService.removeFilters(this.guildId);
+    } catch (error) {
+      logger.error("Error clearing all filters:", error);
+    }
+  }
+
+  async applyFiltersToStream(streamUrl: string): Promise<string | null> {
+    try {
+      if (this.enabledFilters.size === 0) {
+        return streamUrl;
+      }
+
+      const filtersArray = Array.from(this.enabledFilters);
+      return await this.audioFilterService.applyFilters(
+        streamUrl,
+        this.guildId,
+        filtersArray
+      );
+    } catch (error) {
+      logger.error("Error applying filters to stream:", error);
+      return streamUrl; // Return original stream if filtering fails
+    }
+  }
+
+  // AUTOPLAY METHODS
+  enableAutoPlay(): void {
+    this.autoPlayService.enableAutoPlay(this.guildId);
+  }
+
+  disableAutoPlay(): void {
+    this.autoPlayService.disableAutoPlay(this.guildId);
+  }
+
+  isAutoPlayEnabled(): boolean {
+    return this.autoPlayService.isEnabled(this.guildId);
+  }
+
+  getAutoPlayStats() {
+    return this.autoPlayService.getStats(this.guildId);
   }
 }
