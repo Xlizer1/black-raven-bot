@@ -18,12 +18,36 @@ export class YouTubeProvider implements IMusicProvider {
   private static readonly URL_REGEX =
     /^(https?:\/\/)?(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/)[\w-]+/;
 
-  // Rate limiting to avoid triggering bot detection
+  // Enhanced rate limiting and bot detection avoidance
   private lastSearchTime = 0;
-  private readonly SEARCH_COOLDOWN = botConfig.youtube.searchCooldown;
+  private readonly SEARCH_COOLDOWN = Math.max(
+    botConfig.youtube.searchCooldown,
+    8000
+  ); // Minimum 8 seconds
   private searchCount = 0;
-  private readonly MAX_SEARCHES_PER_HOUR = botConfig.youtube.maxSearchesPerHour;
-  private hourlyResetTime = Date.now() + 3600000; // 1 hour
+  private readonly MAX_SEARCHES_PER_HOUR = Math.min(
+    botConfig.youtube.maxSearchesPerHour,
+    15
+  ); // Maximum 15 per hour
+  private hourlyResetTime = Date.now() + 3600000;
+
+  // Bot detection tracking
+  private botDetectionCount = 0;
+  private lastBotDetection = 0;
+  private isInCooldownMode = false;
+  private cooldownEndTime = 0;
+
+  // User agent rotation
+  private userAgents = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPad; CPU OS 17_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Android 14; Mobile; rv:109.0) Gecko/111.0 Firefox/117.0",
+  ];
+
+  private currentUserAgentIndex = 0;
 
   validateUrl(url: string): boolean {
     return YouTubeProvider.URL_REGEX.test(url);
@@ -34,29 +58,53 @@ export class YouTubeProvider implements IMusicProvider {
     options: SearchOptions = {}
   ): Promise<VideoInfo[]> {
     try {
-      // Apply rate limiting
-      await this.applyRateLimit();
+      // Check if we're in extended cooldown due to bot detection
+      if (this.isInCooldownMode && Date.now() < this.cooldownEndTime) {
+        const remainingTime = Math.ceil(
+          (this.cooldownEndTime - Date.now()) / 1000
+        );
+        logger.warn(
+          `🚫 In bot detection cooldown for ${remainingTime} more seconds`
+        );
+        throw new Error("YouTube temporarily unavailable due to bot detection");
+      }
+
+      // Apply enhanced rate limiting
+      await this.applyEnhancedRateLimit();
 
       const limit = options.limit || 1;
       const sanitizedQuery = this.sanitizeQuery(query);
 
-      // Try multiple search strategies with increasing sophistication
-      const strategies = this.getSearchStrategies(sanitizedQuery, limit);
+      // Get progressive search strategies (least to most aggressive)
+      const strategies = this.getProgressiveSearchStrategies(
+        sanitizedQuery,
+        limit
+      );
 
-      for (const strategy of strategies) {
+      for (const [index, strategy] of strategies.entries()) {
         try {
-          logger.debug(`Trying search strategy: ${strategy.name}`);
+          logger.debug(
+            `🔍 Trying search strategy ${index + 1}/${strategies.length}: ${
+              strategy.name
+            }`
+          );
+
+          // Add random delay between strategies
+          if (index > 0) {
+            await this.sleep(2000 + Math.random() * 3000); // 2-5 second delay
+          }
 
           const { stdout } = await execAsync(strategy.command, {
             timeout: strategy.timeout,
-            maxBuffer: 1024 * 1024 * 3,
+            maxBuffer: 1024 * 1024 * 5, // 5MB buffer
           });
 
           const results = this.parseSearchResults(stdout);
 
           if (results.length > 0) {
-            logger.debug(`✅ Success with strategy: ${strategy.name}`);
+            logger.info(`✅ Search successful with strategy: ${strategy.name}`);
             this.updateSearchStats();
+            this.resetBotDetectionTracking();
             return results;
           }
         } catch (error) {
@@ -65,19 +113,30 @@ export class YouTubeProvider implements IMusicProvider {
             this.getErrorSummary(error)
           );
 
-          // If this is a bot detection error, wait longer before next attempt
           if (this.isBotDetectionError(error)) {
-            logger.warn(
-              "🤖 Bot detection triggered, applying extended cooldown"
+            this.handleBotDetection();
+
+            // If this is the last strategy, don't continue
+            if (index === strategies.length - 1) {
+              break;
+            }
+
+            // Apply progressive delay based on detection count
+            const delayTime = Math.min(
+              10000 + this.botDetectionCount * 5000,
+              60000
             );
-            await this.sleep(5000); // 5 second penalty
+            logger.warn(
+              `🤖 Bot detection #${this.botDetectionCount}, waiting ${delayTime}ms`
+            );
+            await this.sleep(delayTime);
           }
 
-          continue; // Try next strategy
+          continue;
         }
       }
 
-      logger.error(`All search strategies failed for query: ${query}`);
+      logger.error(`❌ All search strategies exhausted for query: ${query}`);
       return [];
     } catch (error) {
       logger.error("YouTube search error:", error);
@@ -87,10 +146,15 @@ export class YouTubeProvider implements IMusicProvider {
 
   async getStreamInfo(url: string): Promise<StreamInfo | null> {
     try {
-      // Apply rate limiting
-      await this.applyRateLimit();
+      // Check cooldown
+      if (this.isInCooldownMode && Date.now() < this.cooldownEndTime) {
+        logger.warn("🚫 Skipping stream info due to bot detection cooldown");
+        return null;
+      }
 
-      // First, get basic track info
+      await this.applyEnhancedRateLimit();
+
+      // Get basic info first (lightweight operation)
       let title = "Unknown";
       let duration: number | undefined;
 
@@ -101,15 +165,21 @@ export class YouTubeProvider implements IMusicProvider {
           duration = infoResult.duration;
         }
       } catch (error) {
-        logger.warn("Could not get basic info, using defaults");
+        logger.debug("Basic info failed, continuing with stream extraction");
       }
 
-      // Enhanced streaming strategies with better anti-bot protection
-      const strategies = this.getStreamingStrategies(url);
+      // Enhanced streaming strategies
+      const strategies = this.getEnhancedStreamingStrategies(url);
 
-      for (const strategy of strategies) {
+      for (const [index, strategy] of strategies.entries()) {
         try {
-          logger.debug(`🔄 Trying streaming strategy: ${strategy.name}`);
+          logger.debug(
+            `🎵 Trying streaming strategy ${index + 1}: ${strategy.name}`
+          );
+
+          if (index > 0) {
+            await this.sleep(1500 + Math.random() * 2000); // Random delay
+          }
 
           const { stdout } = await execAsync(strategy.command, {
             timeout: strategy.timeout,
@@ -117,8 +187,9 @@ export class YouTubeProvider implements IMusicProvider {
 
           const streamUrl = stdout.trim();
 
-          if (streamUrl && streamUrl.startsWith("http")) {
-            logger.debug(`✅ Success with strategy: ${strategy.name}`);
+          if (streamUrl && this.isValidStreamUrl(streamUrl)) {
+            logger.info(`✅ Stream extraction successful: ${strategy.name}`);
+            this.resetBotDetectionTracking();
             return {
               title,
               streamUrl,
@@ -128,20 +199,20 @@ export class YouTubeProvider implements IMusicProvider {
           }
         } catch (error) {
           logger.warn(
-            `❌ Strategy "${strategy.name}" failed:`,
+            `❌ Stream strategy "${strategy.name}" failed:`,
             this.getErrorSummary(error)
           );
 
           if (this.isBotDetectionError(error)) {
-            logger.warn("🤖 Bot detection during streaming, applying cooldown");
-            await this.sleep(3000);
+            this.handleBotDetection();
+            break; // Don't try more strategies if bot detection is triggered
           }
 
           continue;
         }
       }
 
-      logger.error(`❌ All streaming strategies failed for: ${title}`);
+      logger.error(`❌ Stream extraction failed for: ${title}`);
       return null;
     } catch (error) {
       logger.error("Stream info error:", error);
@@ -151,21 +222,14 @@ export class YouTubeProvider implements IMusicProvider {
 
   async getTrackInfo(url: string): Promise<VideoInfo | null> {
     try {
-      await this.applyRateLimit();
-
-      // Try full info extraction first
-      try {
-        const command = this.buildInfoCommand(url);
-        const { stdout } = await execAsync(command, {
-          timeout: 20000,
-        });
-        const data = JSON.parse(stdout.trim());
-        return this.parseVideoInfo(data);
-      } catch (error) {
-        logger.warn("Full info extraction failed, trying basic info...");
+      if (this.isInCooldownMode && Date.now() < this.cooldownEndTime) {
+        logger.warn("🚫 Skipping track info due to bot detection cooldown");
+        return null;
       }
 
-      // Fallback to basic info
+      await this.applyEnhancedRateLimit();
+
+      // Try lightweight info extraction
       const basicInfo = await this.getBasicInfo(url);
       if (basicInfo) {
         return {
@@ -195,94 +259,103 @@ export class YouTubeProvider implements IMusicProvider {
     return true;
   }
 
-  // Private helper methods
+  // Enhanced private methods
 
-  private async applyRateLimit(): Promise<void> {
+  private async applyEnhancedRateLimit(): Promise<void> {
     const now = Date.now();
 
-    // Reset hourly counter if needed
+    // Reset hourly counter
     if (now > this.hourlyResetTime) {
       this.searchCount = 0;
       this.hourlyResetTime = now + 3600000;
+      logger.info("🔄 Hourly search limit reset");
     }
 
     // Check hourly limit
     if (this.searchCount >= this.MAX_SEARCHES_PER_HOUR) {
       const waitTime = this.hourlyResetTime - now;
       logger.warn(
-        `Hourly search limit reached. Waiting ${Math.ceil(
+        `⏰ Hourly limit reached. Next reset in ${Math.ceil(
           waitTime / 60000
-        )} minutes.`
+        )} minutes`
       );
       throw new Error("Hourly search limit exceeded");
     }
 
-    // Apply cooldown between searches
+    // Apply progressive cooldown based on recent bot detections
+    let cooldown = this.SEARCH_COOLDOWN;
+    if (this.botDetectionCount > 0) {
+      cooldown = Math.min(cooldown * (1 + this.botDetectionCount), 30000); // Max 30 seconds
+    }
+
     const timeSinceLastSearch = now - this.lastSearchTime;
-    if (timeSinceLastSearch < this.SEARCH_COOLDOWN) {
-      const waitTime = this.SEARCH_COOLDOWN - timeSinceLastSearch;
+    if (timeSinceLastSearch < cooldown) {
+      const waitTime = cooldown - timeSinceLastSearch;
+      logger.debug(`⏱️ Applying rate limit: ${waitTime}ms`);
       await this.sleep(waitTime);
     }
 
     this.lastSearchTime = Date.now();
   }
 
-  private updateSearchStats(): void {
-    this.searchCount++;
-  }
+  private getProgressiveSearchStrategies(query: string, limit: number) {
+    const userAgent = this.getNextUserAgent();
 
-  private sanitizeQuery(query: string): string {
-    return query
-      .replace(/[;&|`$(){}[\]\\]/g, "")
-      .replace(/"/g, '\\"')
-      .trim();
-  }
-
-  private getSearchStrategies(query: string, limit: number) {
     return [
+      // Strategy 1: Ultra minimal
       {
-        name: "Minimal stealth",
-        command: `yt-dlp "ytsearch${limit}:${query}" --dump-json --no-download --skip-download --ignore-errors --no-warnings --quiet --no-check-certificate`,
-        timeout: 15000,
-      },
-      {
-        name: "Mobile user agent",
-        command: `yt-dlp "ytsearch${limit}:${query}" --dump-json --no-download --skip-download --ignore-errors --no-warnings --user-agent "Mozilla/5.0 (iPhone; CPU iPhone OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Mobile/15E148 Safari/604.1" --extractor-retries 2`,
-        timeout: 18000,
-      },
-      {
-        name: "Alternative browser",
-        command: `yt-dlp "ytsearch${limit}:${query}" --dump-json --no-download --skip-download --ignore-errors --no-warnings --user-agent "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.google.com/" --extractor-retries 1`,
+        name: "Ultra Minimal",
+        command: `yt-dlp "ytsearch${limit}:${query}" --dump-json --no-warnings --quiet --skip-download --no-check-certificate --socket-timeout 30`,
         timeout: 20000,
       },
+
+      // Strategy 2: Mobile stealth
       {
-        name: "Fallback search",
-        command: `yt-dlp "ytsearch${limit}:${query}" --dump-json --no-download --skip-download --ignore-errors --quiet --geo-bypass --extractor-retries 1`,
+        name: "Mobile Stealth",
+        command: `yt-dlp "ytsearch${limit}:${query}" --dump-json --no-warnings --quiet --skip-download --user-agent "${this.userAgents[4]}" --referer "https://m.youtube.com/" --sleep-interval 2 --max-sleep-interval 5`,
         timeout: 25000,
+      },
+
+      // Strategy 3: Desktop with cookies simulation
+      {
+        name: "Desktop Stealth",
+        command: `yt-dlp "ytsearch${limit}:${query}" --dump-json --no-warnings --quiet --skip-download --user-agent "${userAgent}" --referer "https://www.google.com/search?q=${encodeURIComponent(
+          query
+        )}" --sleep-requests 3`,
+        timeout: 30000,
+      },
+
+      // Strategy 4: Geographic bypass
+      {
+        name: "Geo Bypass",
+        command: `yt-dlp "ytsearch${limit}:${query}" --dump-json --no-warnings --quiet --skip-download --geo-bypass --geo-bypass-country US --extractor-retries 1`,
+        timeout: 35000,
       },
     ];
   }
 
-  private getStreamingStrategies(url: string) {
+  private getEnhancedStreamingStrategies(url: string) {
+    const userAgent = this.getNextUserAgent();
+
     return [
+      // Strategy 1: Minimal audio extraction
       {
-        name: "Minimal stealth streaming",
-        command: `yt-dlp "${url}" --get-url --format "bestaudio[ext=m4a]/bestaudio/best" --quiet --no-check-certificate`,
-        timeout: 15000,
-      },
-      {
-        name: "Mobile streaming",
-        command: `yt-dlp "${url}" --get-url --format "140/251/250/249/bestaudio/worst" --user-agent "Mozilla/5.0 (iPhone; CPU iPhone OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15" --extractor-retries 2`,
+        name: "Minimal Audio",
+        command: `yt-dlp "${url}" --get-url --format "140/251/250/249" --no-warnings --quiet --socket-timeout 30`,
         timeout: 20000,
       },
+
+      // Strategy 2: Mobile audio
       {
-        name: "Alternative streaming",
-        command: `yt-dlp "${url}" --get-url --format "bestaudio/worst" --user-agent "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.youtube.com/" --extractor-retries 2`,
+        name: "Mobile Audio",
+        command: `yt-dlp "${url}" --get-url --format "140/worst" --user-agent "${this.userAgents[4]}" --no-warnings --quiet --sleep-requests 2`,
         timeout: 25000,
       },
+
+      // Strategy 3: Fallback any format
       {
-        name: "Fallback streaming",
-        command: `yt-dlp "${url}" --get-url --format "worst" --quiet --geo-bypass --extractor-retries 1`,
+        name: "Fallback Format",
+        command: `yt-dlp "${url}" --get-url --format "bestaudio/worst" --user-agent "${userAgent}" --no-warnings --quiet --geo-bypass`,
         timeout: 30000,
       },
     ];
@@ -292,7 +365,9 @@ export class YouTubeProvider implements IMusicProvider {
     url: string
   ): Promise<{ title: string; duration?: number } | null> {
     try {
-      const command = `yt-dlp "${url}" --get-title --get-duration --quiet --no-check-certificate`;
+      const userAgent = this.getNextUserAgent();
+      const command = `yt-dlp "${url}" --get-title --get-duration --no-warnings --quiet --user-agent "${userAgent}" --socket-timeout 20`;
+
       const { stdout } = await execAsync(command, { timeout: 15000 });
       const lines = stdout.trim().split("\n");
 
@@ -314,8 +389,55 @@ export class YouTubeProvider implements IMusicProvider {
     return null;
   }
 
-  private buildInfoCommand(url: string): string {
-    return `yt-dlp "${url}" --dump-json --no-download --skip-download --quiet --no-check-certificate --extractor-retries 1`;
+  private handleBotDetection(): void {
+    this.botDetectionCount++;
+    this.lastBotDetection = Date.now();
+
+    // Enter extended cooldown mode after 3 detections
+    if (this.botDetectionCount >= 3) {
+      this.isInCooldownMode = true;
+      this.cooldownEndTime = Date.now() + 5 * 60 * 1000; // 5 minute cooldown
+      logger.warn(
+        `🚫 Entering 5-minute cooldown due to repeated bot detection`
+      );
+    }
+  }
+
+  private resetBotDetectionTracking(): void {
+    // Reset tracking after successful operation
+    if (Date.now() - this.lastBotDetection > 300000) {
+      // 5 minutes
+      this.botDetectionCount = 0;
+      this.isInCooldownMode = false;
+      this.cooldownEndTime = 0;
+    }
+  }
+
+  private getNextUserAgent(): string | undefined {
+    const agent = this.userAgents[this.currentUserAgentIndex];
+    this.currentUserAgentIndex =
+      (this.currentUserAgentIndex + 1) % this.userAgents.length;
+    return agent;
+  }
+
+  private isValidStreamUrl(url: string): boolean {
+    return (
+      url.startsWith("http") &&
+      (url.includes("googlevideo.com") ||
+        url.includes("youtube.com") ||
+        url.includes("ytimg.com"))
+    );
+  }
+
+  private updateSearchStats(): void {
+    this.searchCount++;
+  }
+
+  private sanitizeQuery(query: string): string {
+    return query
+      .replace(/[;&|`$(){}[\]\\]/g, "")
+      .replace(/"/g, '\\"')
+      .trim();
   }
 
   private parseSearchResults(stdout: string): VideoInfo[] {
@@ -382,7 +504,9 @@ export class YouTubeProvider implements IMusicProvider {
       errorStr.includes("captcha") ||
       errorStr.includes("bot detection") ||
       errorStr.includes("403") ||
-      errorStr.includes("429")
+      errorStr.includes("429") ||
+      errorStr.includes("please confirm") ||
+      errorStr.includes("verification")
     );
   }
 
@@ -390,7 +514,6 @@ export class YouTubeProvider implements IMusicProvider {
     if (!error) return "Unknown error";
 
     if (typeof error === "object" && error.stderr) {
-      // Extract key parts of the error
       const stderr = error.stderr.toString();
       if (stderr.includes("Sign in to confirm")) {
         return "Bot detection triggered";
