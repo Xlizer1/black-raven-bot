@@ -5,7 +5,6 @@ import {
   MusicPlatform,
   type SearchOptions,
 } from "./IMusicProvider";
-import { YouTubeProvider } from "./YouTubeProvider";
 import { botConfig } from "../../config/config";
 import { logger } from "../../utils/logger";
 
@@ -21,6 +20,7 @@ interface SpotifyTrack {
   external_urls: {
     spotify: string;
   };
+  preview_url?: string; // Spotify's 30-second preview
 }
 
 interface SpotifyPlaylist {
@@ -65,15 +65,6 @@ export class SpotifyProvider implements IMusicProvider {
 
   private accessToken: string | null = null;
   private tokenExpiry: number = 0;
-  private youtubeProvider: YouTubeProvider;
-
-  // Enhanced retry and fallback mechanisms
-  private conversionCache = new Map<string, VideoInfo | null>();
-  private failedConversions = new Set<string>();
-
-  constructor() {
-    this.youtubeProvider = new YouTubeProvider();
-  }
 
   validateUrl(url: string): boolean {
     return SpotifyProvider.URL_REGEX.test(url);
@@ -89,10 +80,8 @@ export class SpotifyProvider implements IMusicProvider {
   ): Promise<VideoInfo[]> {
     try {
       if (!this.isConfigured()) {
-        logger.warn(
-          "Spotify API not configured, falling back to YouTube search"
-        );
-        return this.youtubeProvider.search(query, options);
+        logger.warn("Spotify API not configured");
+        throw new Error("Spotify API credentials not configured");
       }
 
       await this.ensureAuthenticated();
@@ -115,7 +104,7 @@ export class SpotifyProvider implements IMusicProvider {
         logger.error(
           `Spotify search failed: ${response.status} ${response.statusText}`
         );
-        return this.youtubeProvider.search(query, options);
+        throw new Error(`Spotify search failed: ${response.status}`);
       }
 
       const data = (await response.json()) as SpotifySearchResponse;
@@ -126,25 +115,37 @@ export class SpotifyProvider implements IMusicProvider {
         results.push(this.convertSpotifyTrackToVideoInfo(track));
       }
 
+      logger.info(
+        `Spotify search found ${results.length} results for: ${query}`
+      );
       return results;
     } catch (error) {
       logger.error("Spotify search error:", error);
-      return this.youtubeProvider.search(query, options);
+      throw error;
     }
   }
 
   async getStreamInfo(url: string): Promise<StreamInfo | null> {
+    // Spotify doesn't allow direct streaming - only metadata and 30-second previews
+    logger.warn(
+      "Spotify direct streaming not supported - use preview URL or metadata only"
+    );
+
     try {
-      // Get Spotify track info first
       const trackInfo = await this.getTrackInfo(url);
       if (!trackInfo) {
         return null;
       }
 
-      // Try to convert to YouTube stream with enhanced fallback
-      return this.convertToYouTubeStreamWithFallback(trackInfo);
+      // Return a "stream info" that indicates this is Spotify metadata only
+      return {
+        title: trackInfo.title,
+        streamUrl: trackInfo.url, // This is the Spotify URL, not a stream
+        duration: trackInfo.duration,
+        platform: this.platform,
+      };
     } catch (error) {
-      logger.error("Spotify stream conversion error:", error);
+      logger.error("Spotify stream info error:", error);
       return null;
     }
   }
@@ -158,7 +159,7 @@ export class SpotifyProvider implements IMusicProvider {
       }
 
       if (!this.isConfigured()) {
-        logger.warn("Spotify API not configured, cannot get track info");
+        logger.warn("Spotify API not configured");
         return null;
       }
 
@@ -201,7 +202,7 @@ export class SpotifyProvider implements IMusicProvider {
       }
 
       if (!this.isConfigured()) {
-        logger.warn("Spotify API not configured, cannot get playlist info");
+        logger.warn("Spotify API not configured");
         return null;
       }
 
@@ -247,7 +248,7 @@ export class SpotifyProvider implements IMusicProvider {
       }
 
       if (!this.isConfigured()) {
-        logger.warn("Spotify API not configured, cannot load playlist");
+        logger.warn("Spotify API not configured");
         return [];
       }
 
@@ -261,7 +262,7 @@ export class SpotifyProvider implements IMusicProvider {
         const currentLimit = Math.min(batchSize, limit - results.length);
 
         const response = await fetch(
-          `${SpotifyProvider.BASE_URL}/playlists/${playlistId}/tracks?limit=${currentLimit}&offset=${offset}&fields=items.track(id,name,artists,album,duration_ms,external_urls)`,
+          `${SpotifyProvider.BASE_URL}/playlists/${playlistId}/tracks?limit=${currentLimit}&offset=${offset}&fields=items.track(id,name,artists,album,duration_ms,external_urls,preview_url)`,
           {
             headers: {
               Authorization: `Bearer ${this.accessToken}`,
@@ -317,10 +318,10 @@ export class SpotifyProvider implements IMusicProvider {
   }
 
   supportsDirectStreaming(): boolean {
-    return false; // Always requires YouTube conversion
+    return false; // Spotify doesn't support direct streaming - metadata only
   }
 
-  // Enhanced private helper methods
+  // Private helper methods
 
   private isConfigured(): boolean {
     return !!(botConfig.spotify.clientId && botConfig.spotify.clientSecret);
@@ -385,231 +386,12 @@ export class SpotifyProvider implements IMusicProvider {
     return {
       id: track.id,
       title: track.name,
-      url: track.external_urls.spotify,
+      url: track.external_urls.spotify, // Keep as Spotify URL
       duration: Math.floor(track.duration_ms / 1000),
       thumbnail,
       platform: this.platform,
       artist: artists,
       album: track.album.name,
     };
-  }
-
-  private async convertToYouTubeStreamWithFallback(
-    spotifyTrack: VideoInfo
-  ): Promise<StreamInfo | null> {
-    const cacheKey = `${spotifyTrack.artist}-${spotifyTrack.title}`;
-
-    // Check if we've already failed to convert this track
-    if (this.failedConversions.has(cacheKey)) {
-      logger.debug(`Skipping previously failed conversion: ${cacheKey}`);
-      return null;
-    }
-
-    // Check cache first
-    if (this.conversionCache.has(cacheKey)) {
-      const cached = this.conversionCache.get(cacheKey);
-      if (cached) {
-        return this.youtubeProvider.getStreamInfo(cached.url);
-      }
-      return null;
-    }
-
-    try {
-      // Try multiple search variations
-      const searchQueries = this.generateSearchQueries(spotifyTrack);
-
-      for (const [queryType, searchQuery] of searchQueries) {
-        try {
-          logger.debug(`Trying ${queryType}: ${searchQuery}`);
-
-          const youtubeResults = await this.youtubeProvider.search(
-            searchQuery,
-            {
-              limit: 3, // Get multiple results to find best match
-            }
-          );
-
-          if (youtubeResults.length === 0) {
-            logger.debug(`No results for ${queryType}`);
-            continue;
-          }
-
-          // Find the best match based on title similarity and duration
-          const bestMatch = this.findBestMatch(spotifyTrack, youtubeResults);
-
-          if (bestMatch) {
-            logger.info(`✅ Found match via ${queryType}: ${bestMatch.title}`);
-
-            // Cache the successful conversion
-            this.conversionCache.set(cacheKey, bestMatch);
-
-            // Get stream info
-            const streamInfo = await this.youtubeProvider.getStreamInfo(
-              bestMatch.url
-            );
-
-            if (streamInfo) {
-              return {
-                ...streamInfo,
-                title: `${spotifyTrack.title} (via Spotify)`,
-                platform: this.platform,
-              };
-            }
-          }
-        } catch (error: any) {
-          logger.debug(
-            `Search variation "${queryType}" failed:`,
-            error.message || error
-          );
-          continue;
-        }
-      }
-
-      // All search variations failed
-      logger.warn(`❌ All search variations failed for: ${spotifyTrack.title}`);
-      this.failedConversions.add(cacheKey);
-      this.conversionCache.set(cacheKey, null);
-
-      return null;
-    } catch (error) {
-      logger.error("YouTube conversion error:", error);
-      this.failedConversions.add(cacheKey);
-      return null;
-    }
-  }
-
-  private generateSearchQueries(track: VideoInfo): Array<[string, string]> {
-    const artist = track.artist || "";
-    const title = track.title;
-    const cleanTitle = this.cleanTitle(title);
-    const cleanArtist = this.cleanArtist(artist);
-
-    const queries: Array<[string, string]> = [];
-
-    // 1. Exact artist + title
-    if (cleanArtist && cleanTitle) {
-      queries.push(["exact", `${cleanArtist} ${cleanTitle}`]);
-    }
-
-    // 2. Title + artist (reversed order)
-    if (cleanArtist && cleanTitle) {
-      queries.push(["reversed", `${cleanTitle} ${cleanArtist}`]);
-    }
-
-    // 3. Title only
-    if (cleanTitle) {
-      queries.push(["title-only", cleanTitle]);
-    }
-
-    // 4. Artist + title + "official"
-    if (cleanArtist && cleanTitle) {
-      queries.push(["official", `${cleanArtist} ${cleanTitle} official`]);
-    }
-
-    // 5. Artist + title + "music video"
-    if (cleanArtist && cleanTitle) {
-      queries.push(["music-video", `${cleanArtist} ${cleanTitle} music video`]);
-    }
-
-    // 6. Artist + title + "audio"
-    if (cleanArtist && cleanTitle) {
-      queries.push(["audio", `${cleanArtist} ${cleanTitle} audio`]);
-    }
-
-    // 7. Title with quotes (exact match attempt)
-    if (cleanTitle.length > 3) {
-      queries.push(["quoted", `"${cleanTitle}"`]);
-    }
-
-    return queries;
-  }
-
-  private cleanTitle(title: string): string {
-    return title
-      .replace(/\s*\(feat\..*?\)/gi, "") // Remove featuring
-      .replace(/\s*\[.*?\]/g, "") // Remove bracketed content
-      .replace(/\s*\(.*?\)/g, "") // Remove parenthetical content
-      .replace(/\s+/g, " ") // Normalize spaces
-      .trim();
-  }
-
-  private cleanArtist(artist: string): string {
-    // Take first artist if multiple
-    const firstArtist = artist.split(",")[0] || artist.split("&")[0] || artist;
-    return firstArtist.trim();
-  }
-
-  private findBestMatch(
-    spotifyTrack: VideoInfo,
-    youtubeResults: VideoInfo[]
-  ): VideoInfo | null {
-    if (youtubeResults.length === 0) return null;
-
-    let bestMatch = youtubeResults[0] || null;
-    let bestScore = 0;
-
-    for (const result of youtubeResults) {
-      const score = this.calculateSimilarityScore(spotifyTrack, result);
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestMatch = result;
-      }
-    }
-
-    // Only return if the match is reasonably good
-    return bestScore > 0.3 ? bestMatch : youtubeResults[0] || null;
-  }
-
-  private calculateSimilarityScore(
-    spotifyTrack: VideoInfo,
-    youtubeResult: VideoInfo
-  ): number {
-    let score = 0;
-
-    // Title similarity (most important)
-    const titleSimilarity = this.stringSimilarity(
-      spotifyTrack.title.toLowerCase(),
-      youtubeResult.title.toLowerCase()
-    );
-    score += titleSimilarity * 0.6;
-
-    // Artist similarity
-    if (spotifyTrack.artist && youtubeResult.artist) {
-      const artistSimilarity = this.stringSimilarity(
-        spotifyTrack.artist.toLowerCase(),
-        youtubeResult.artist.toLowerCase()
-      );
-      score += artistSimilarity * 0.3;
-    }
-
-    // Duration similarity (if available)
-    if (spotifyTrack.duration && youtubeResult.duration) {
-      const durationDiff = Math.abs(
-        spotifyTrack.duration - youtubeResult.duration
-      );
-      const durationSimilarity = Math.max(0, 1 - durationDiff / 60); // Penalize >60s difference
-      score += durationSimilarity * 0.1;
-    }
-
-    return score;
-  }
-
-  private stringSimilarity(str1: string, str2: string): number {
-    // Simple similarity calculation based on common words
-    const words1 = str1.split(/\s+/);
-    const words2 = str2.split(/\s+/);
-
-    let commonWords = 0;
-    for (const word1 of words1) {
-      if (
-        word1.length > 2 &&
-        words2.some((word2) => word2.includes(word1) || word1.includes(word2))
-      ) {
-        commonWords++;
-      }
-    }
-
-    return commonWords / Math.max(words1.length, words2.length);
   }
 }

@@ -29,12 +29,14 @@ export class PlayCommand extends Command {
     registry.registerChatInputCommand((builder) =>
       builder
         .setName("play")
-        .setDescription("Play music from URLs or search YouTube")
+        .setDescription("Play music from YouTube URLs or search YouTube")
         .addStringOption(
           (option) =>
             option
               .setName("query")
-              .setDescription("Song name, YouTube URL, or Spotify URL")
+              .setDescription(
+                "Song name, YouTube URL, or Spotify URL (for metadata)"
+              )
               .setRequired(true)
               .setAutocomplete(true) // Enable autocomplete
         )
@@ -119,7 +121,7 @@ export class PlayCommand extends Command {
       if (!trackInfo) {
         // Check if input is a URL or text search
         if (MusicService.isUrl(query)) {
-          // NEW: Check if it's a playlist URL
+          // Check if it's a playlist URL
           if (this.isPlaylistUrl(query)) {
             const platform = this.getPlaylistPlatform(query);
             return interaction.editReply({
@@ -137,19 +139,62 @@ export class PlayCommand extends Command {
             });
           }
 
-          // Continue with existing single track logic...
           const detectedPlatform = MusicService.detectPlatform(query);
           if (!detectedPlatform) {
             return interaction.editReply({
               content:
                 "❌ **Unsupported URL!**\n\n" +
                 "Supported platforms:\n" +
-                "📺 **YouTube**: youtube.com or youtu.be URLs\n" +
-                "🟢 **Spotify**: open.spotify.com URLs\n\n" +
+                "📺 **YouTube**: youtube.com or youtu.be URLs (for playback)\n" +
+                "🟢 **Spotify**: open.spotify.com URLs (for metadata only)\n\n" +
                 "💡 Make sure you're using a direct link to a song or video",
             });
           }
 
+          // Handle Spotify URLs differently - NO YOUTUBE CONVERSION
+          if (detectedPlatform === MusicPlatform.SPOTIFY) {
+            try {
+              const spotifyTrack = await MusicService.getTrackInfo(query);
+              if (spotifyTrack) {
+                const searchQuery = `${spotifyTrack.artist} ${spotifyTrack.title}`;
+
+                return interaction.editReply({
+                  content:
+                    `🟢 **Spotify Track Detected:**\n\n` +
+                    `🎵 **${spotifyTrack.title}**\n` +
+                    `👤 **Artist:** ${spotifyTrack.artist}\n` +
+                    `💿 **Album:** ${spotifyTrack.album}\n` +
+                    `⏱️ **Duration:** ${this.formatDuration(
+                      spotifyTrack.duration || 0
+                    )}\n\n` +
+                    `⚠️ **Spotify doesn't allow direct playback**\n\n` +
+                    `💡 **Search for this song on YouTube instead:**\n` +
+                    `\`/play ${searchQuery}\`\n\n` +
+                    `🔍 **Or use the search command:**\n` +
+                    `\`/search query:${searchQuery}\``,
+                });
+              } else {
+                return interaction.editReply({
+                  content:
+                    "❌ **Could not load Spotify track information!**\n\n" +
+                    "This could happen if:\n" +
+                    "• The track is not available in your region\n" +
+                    "• The Spotify link is invalid\n" +
+                    "• Spotify API is temporarily unavailable\n\n" +
+                    "💡 Try copying the song name and searching manually with `/play <song name>`",
+                });
+              }
+            } catch (error) {
+              return interaction.editReply({
+                content:
+                  "❌ **Spotify integration error!**\n\n" +
+                  "There was an issue accessing Spotify data.\n" +
+                  "💡 Try searching for the song name manually instead.",
+              });
+            }
+          }
+
+          // Handle YouTube URLs only
           logger.info(`Processing ${detectedPlatform} URL: ${query}`);
           trackInfo = await MusicService.getTrackInfo(query);
 
@@ -159,11 +204,11 @@ export class PlayCommand extends Command {
               `❌ **Could not load ${detectedPlatform} content!**\n\n` +
                 `${platformEmoji} **URL**: ${query}\n\n` +
                 "This could happen if:\n" +
-                "• The video/track is private or deleted\n" +
+                "• The video is private or deleted\n" +
                 "• The content is region-locked\n" +
                 "• The URL is malformed\n" +
-                "• The platform is temporarily unavailable\n\n" +
-                "💡 Try a different URL or check if the content is accessible"
+                "• YouTube is temporarily blocking requests\n\n" +
+                "💡 Try a different URL or use `/play <song name>` to search instead"
             );
           }
         } else {
@@ -187,7 +232,8 @@ export class PlayCommand extends Command {
                 "💡 **Try:**\n" +
                 "• Different search terms\n" +
                 "• More specific song/artist names\n" +
-                "• A direct YouTube or Spotify URL instead",
+                "• A direct YouTube URL instead\n" +
+                "• Using `/search` command for more options",
             });
           }
 
@@ -199,6 +245,18 @@ export class PlayCommand extends Command {
         return interaction.editReply("❌ Failed to get track information!");
       }
 
+      // Prevent playing Spotify tracks directly
+      if (trackInfo.platform === MusicPlatform.SPOTIFY) {
+        return interaction.editReply({
+          content:
+            "❌ **Cannot play Spotify tracks directly!**\n\n" +
+            `🎵 **Track**: ${trackInfo.title}\n` +
+            `👤 **Artist**: ${trackInfo.artist}\n\n` +
+            `💡 **Search for this song on YouTube instead:**\n` +
+            `\`/play ${trackInfo.artist} ${trackInfo.title}\``,
+        });
+      }
+
       // Show detected song info immediately
       const platformEmoji = this.getPlatformEmoji(trackInfo.platform);
       const artist = trackInfo.artist ? ` - ${trackInfo.artist}` : "";
@@ -206,7 +264,7 @@ export class PlayCommand extends Command {
         ? ` (${this.formatDuration(trackInfo.duration)})`
         : "";
 
-      // Check if filters are active - FIXED: use getEnabledFilters() instead of getActiveFilters()
+      // Check if filters are active
       const activeFilters = queue.getEnabledFilters();
       const filterText =
         activeFilters.length > 0
@@ -261,7 +319,11 @@ export class PlayCommand extends Command {
       logger.error("Play command error:", error);
       return interaction.editReply(
         "❌ **An error occurred while processing the request!**\n\n" +
-          "Please try again, or use a different URL if the problem persists."
+          "This could be due to:\n" +
+          "• YouTube connection issues\n" +
+          "• Bot detection blocking requests\n" +
+          "• Invalid URL or unavailable content\n\n" +
+          "💡 Try `/status test` to check connection or use `/status reset` if needed."
       );
     }
   }
@@ -298,7 +360,7 @@ export class PlayCommand extends Command {
     voiceChannel: any,
     interaction: any
   ): Promise<void> {
-    const currentSong = queue.next(); // FIXED: Remove await since next() returns QueueItem | null, not Promise
+    const currentSong = queue.next();
     if (!currentSong) {
       queue.setPlaying(false);
       return;
@@ -323,11 +385,11 @@ export class PlayCommand extends Command {
         return this.playNext(queue, voiceChannel, interaction);
       }
 
-      // Apply filters if any are active - FIXED: Handle null return value
+      // Apply filters if any are active
       const filteredStreamUrl = await queue.applyFiltersToStream(
         baseStreamInfo.streamUrl
       );
-      const finalStreamUrl = filteredStreamUrl || baseStreamInfo.streamUrl; // Fallback to original if null
+      const finalStreamUrl = filteredStreamUrl || baseStreamInfo.streamUrl;
 
       // Join voice channel if not connected
       let connection = queue.getConnection();
@@ -341,7 +403,7 @@ export class PlayCommand extends Command {
         await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
       }
 
-      // Create audio resource with filtered stream - FIXED: Use finalStreamUrl which is guaranteed to be string
+      // Create audio resource with filtered stream
       const resource = createAudioResource(finalStreamUrl, {
         inputType: StreamType.Arbitrary,
       });
@@ -379,7 +441,7 @@ export class PlayCommand extends Command {
         : "";
       const artist = currentSong.artist ? ` - ${currentSong.artist}` : "";
 
-      // Show active filters in now playing message - FIXED: use getEnabledFilters() instead of getActiveFilters()
+      // Show active filters in now playing message
       const activeFilters = queue.getEnabledFilters();
       const filterText =
         activeFilters.length > 0
