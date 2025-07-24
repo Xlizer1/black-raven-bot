@@ -234,10 +234,7 @@ export class SpotifyProvider implements IMusicProvider {
     }
   }
 
-  async loadPlaylistSongs(
-    url: string,
-    limit: number = 50
-  ): Promise<VideoInfo[]> {
+  async loadPlaylistSongs(url: string, limit: number = 50): Promise<VideoInfo[]> {
     try {
       const playlistId = this.extractPlaylistId(url);
       if (!playlistId) {

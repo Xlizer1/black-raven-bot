@@ -3,12 +3,6 @@
 import { VoiceConnection, AudioPlayer } from "@discordjs/voice";
 import type { VideoInfo } from "./providers/IMusicProvider";
 import { logger } from "../utils/logger";
-import {
-  AudioFilterService,
-  type AudioFilters,
-  DEFAULT_FILTERS,
-} from "./AudioFilterService";
-import { AutoPlayService } from "./AutoPlayService";
 
 export interface QueueItem extends VideoInfo {
   requestedBy: string; // User ID
@@ -29,26 +23,10 @@ export class MusicQueue {
   private isPlaying = false;
   private connection: VoiceConnection | null = null;
   private player: AudioPlayer | null = null;
-
-  // Enhanced properties
   private repeatMode: RepeatMode = RepeatMode.OFF;
   private volume: number = 1.0;
-  private history: QueueItem[] = [];
-  private autoLeaveTimeout: NodeJS.Timeout | null = null;
-  private is24x7Enabled: boolean = false;
 
-  // Audio filters integration
-  private activeFilters: Record<keyof AudioFilters, string> = {
-    ...DEFAULT_FILTERS,
-  };
-  private enabledFilters: Set<keyof AudioFilters> = new Set();
-  private audioFilterService: AudioFilterService;
-  private autoPlayService: AutoPlayService;
-
-  private constructor(private guildId: string) {
-    this.audioFilterService = AudioFilterService.getInstance();
-    this.autoPlayService = AutoPlayService.getInstance();
-  }
+  private constructor(private guildId: string) {}
 
   static getQueue(guildId: string): MusicQueue {
     if (!this.instances.has(guildId)) {
@@ -74,11 +52,6 @@ export class MusicQueue {
 
     this.queue.push(queueItem);
 
-    // Trigger autoplay check if enabled
-    this.autoPlayService.checkAndAddSongs(this.guildId).catch((error) => {
-      logger.warn("AutoPlay check failed:", error);
-    });
-
     return queueItem;
   }
 
@@ -95,8 +68,6 @@ export class MusicQueue {
     const current = this.currentSong;
 
     if (current) {
-      this.addToHistory(current);
-
       // Handle repeat modes
       if (this.repeatMode === RepeatMode.TRACK) {
         return current; // Repeat current song
@@ -104,25 +75,6 @@ export class MusicQueue {
     }
 
     const nextItem = this.queue.shift();
-
-    // Handle queue repeat
-    if (
-      !nextItem &&
-      this.repeatMode === RepeatMode.QUEUE &&
-      this.history.length > 0
-    ) {
-      // Restart queue from history (in reverse order)
-      this.queue = [...this.history.reverse()];
-      this.history = [];
-      return this.queue.shift() || null;
-    }
-
-    // Trigger autoplay if queue is getting low
-    if (this.queue.length <= 2) {
-      this.autoPlayService.checkAndAddSongs(this.guildId).catch((error) => {
-        logger.warn("AutoPlay check failed:", error);
-      });
-    }
 
     return nextItem || null;
   }
@@ -137,13 +89,6 @@ export class MusicQueue {
     this.queue = [];
     this.currentSong = null;
     this.isPlaying = false;
-    this.clearAutoLeaveTimer();
-
-    // Clear audio filters
-    this.enabledFilters.clear();
-    this.audioFilterService.removeFilters(this.guildId).catch((error) => {
-      logger.warn("Failed to clear audio filters:", error);
-    });
 
     if (this.connection) {
       this.connection.destroy();
@@ -196,13 +141,6 @@ export class MusicQueue {
 
   setPlaying(playing: boolean): void {
     this.isPlaying = playing;
-    if (playing) {
-      this.clearAutoLeaveTimer();
-    } else {
-      if (!this.is24x7Enabled) {
-        this.startAutoLeaveTimer();
-      }
-    }
   }
 
   getIsPlaying(): boolean {
@@ -262,154 +200,5 @@ export class MusicQueue {
 
   getVolume(): number {
     return this.volume;
-  }
-
-  // HISTORY METHODS
-  addToHistory(item: QueueItem): void {
-    this.history.unshift(item);
-    // Keep only last 50 songs in history
-    if (this.history.length > 50) {
-      this.history = this.history.slice(0, 50);
-    }
-  }
-
-  getHistory(): readonly QueueItem[] {
-    return [...this.history];
-  }
-
-  // 24/7 MODE METHODS
-  set24x7(enabled: boolean): void {
-    this.is24x7Enabled = enabled;
-    if (enabled) {
-      this.clearAutoLeaveTimer();
-      logger.info(`24/7 mode enabled for guild: ${this.guildId}`);
-    } else {
-      if (!this.isPlaying && this.queue.length === 0) {
-        this.startAutoLeaveTimer();
-      }
-      logger.info(`24/7 mode disabled for guild: ${this.guildId}`);
-    }
-  }
-
-  get24x7(): boolean {
-    return this.is24x7Enabled;
-  }
-
-  // AUTO-LEAVE METHODS (enhanced to handle 24/7 mode)
-  startAutoLeaveTimer(): void {
-    if (this.is24x7Enabled) {
-      return; // Don't start timer if 24/7 mode is enabled
-    }
-
-    this.clearAutoLeaveTimer();
-    this.autoLeaveTimeout = setTimeout(() => {
-      if (this.connection && this.queue.length === 0 && !this.isPlaying) {
-        this.connection.destroy();
-        this.connection = null;
-        logger.info(
-          `Auto-left voice channel due to inactivity: ${this.guildId}`
-        );
-      }
-    }, 5 * 60 * 1000); // 5 minutes
-  }
-
-  clearAutoLeaveTimer(): void {
-    if (this.autoLeaveTimeout) {
-      clearTimeout(this.autoLeaveTimeout);
-      this.autoLeaveTimeout = null;
-    }
-  }
-
-  // AUDIO FILTERS METHODS
-  async enableFilter(filter: keyof AudioFilters): Promise<boolean> {
-    try {
-      if (await this.audioFilterService.validateFilter(filter)) {
-        this.enabledFilters.add(filter);
-        return true;
-      }
-      return false;
-    } catch (error) {
-      logger.error(`Error enabling filter ${filter}:`, error);
-      return false;
-    }
-  }
-
-  async disableFilter(filter: keyof AudioFilters): Promise<boolean> {
-    try {
-      this.enabledFilters.delete(filter);
-      return true;
-    } catch (error) {
-      logger.error(`Error disabling filter ${filter}:`, error);
-      return false;
-    }
-  }
-
-  getEnabledFilters(): (keyof AudioFilters)[] {
-    return Array.from(this.enabledFilters);
-  }
-
-  async clearAllFilters(): Promise<void> {
-    try {
-      this.enabledFilters.clear();
-      await this.audioFilterService.removeFilters(this.guildId);
-    } catch (error) {
-      logger.error("Error clearing all filters:", error);
-    }
-  }
-
-  async applyFiltersToStream(streamUrl: string): Promise<string | null> {
-    try {
-      if (this.enabledFilters.size === 0) {
-        return streamUrl;
-      }
-
-      const filtersArray = Array.from(this.enabledFilters);
-      return await this.audioFilterService.applyFilters(
-        streamUrl,
-        this.guildId,
-        filtersArray
-      );
-    } catch (error) {
-      logger.error("Error applying filters to stream:", error);
-      return streamUrl; // Return original stream if filtering fails
-    }
-  }
-
-  // STATUS METHODS
-  getStatus(): {
-    alwaysOn: boolean;
-    autoPlay: boolean;
-    repeatMode: RepeatMode;
-    volume: number;
-    isPlaying: boolean;
-    queueSize: number;
-    currentSong: QueueItem | null;
-  } {
-    return {
-      alwaysOn: this.is24x7Enabled,
-      autoPlay: this.isAutoPlayEnabled(),
-      repeatMode: this.repeatMode,
-      volume: this.volume,
-      isPlaying: this.isPlaying,
-      queueSize: this.queue.length,
-      currentSong: this.currentSong,
-    };
-  }
-
-  // AUTOPLAY METHODS
-  enableAutoPlay(): void {
-    this.autoPlayService.enableAutoPlay(this.guildId);
-  }
-
-  disableAutoPlay(): void {
-    this.autoPlayService.disableAutoPlay(this.guildId);
-  }
-
-  isAutoPlayEnabled(): boolean {
-    return this.autoPlayService.isEnabled(this.guildId);
-  }
-
-  getAutoPlayStats() {
-    return this.autoPlayService.getStats(this.guildId);
   }
 }

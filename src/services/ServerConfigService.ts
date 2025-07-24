@@ -1,49 +1,24 @@
 import { logger } from "../utils/logger";
-import type { DJSettings } from "./DJPermissionService";
-import type { AudioFilters } from "./AudioFilterService";
 
 export interface ServerConfig {
-  // Basic settings
   guildId: string;
-  defaultVolume: number; // 0-100
+  defaultVolume: number;
   announceNowPlaying: boolean;
-  deleteMessagesAfter: number; // seconds, 0 = never
-
-  // Music settings
+  deleteMessagesAfter: number;
   maxQueueSize: number;
-  maxSongDuration: number; // seconds, 0 = unlimited
+  maxSongDuration: number;
   allowExplicitContent: boolean;
   defaultPlatform: "youtube" | "spotify";
-
-  // Behavior settings
-  autoLeaveTimeout: number; // seconds
-  skipVoteThreshold: number; // 0.5 = 50%
+  autoLeaveTimeout: number;
+  skipVoteThreshold: number;
   enableTextInVoice: boolean;
-
-  // Filter presets
-  defaultFilters: Partial<AudioFilters>;
-  filterPresets: Record<string, AudioFilters>;
-
-  // DJ settings
-  djSettings: DJSettings;
-
-  // Logging and analytics
   logCommands: boolean;
   trackUsageStats: boolean;
-
-  // Auto-moderation
   banOffensiveWords: boolean;
-  maxRequestsPerUser: number; // per hour
-
-  // Integration settings
+  maxRequestsPerUser: number;
   lastfmEnabled: boolean;
   spotifyIntegration: boolean;
-
-  // UI customization
-  embedColor: string; // hex color
-  customEmojis: Record<string, string>;
-
-  // Timestamps
+  embedColor: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -85,64 +60,6 @@ export class ServerConfigService {
       skipVoteThreshold: 0.5,
       enableTextInVoice: false,
 
-      defaultFilters: {},
-      filterPresets: {
-        "Bass Boost": {
-          bassboost: 5,
-          nightcore: false,
-          vaporwave: false,
-          eightD: false,
-          karaoke: false,
-          speed: 1.0,
-          pitch: 1.0,
-          treblebass: false,
-          loudness: false,
-          mono: false,
-        },
-        Nightcore: {
-          bassboost: false,
-          nightcore: true,
-          vaporwave: false,
-          eightD: false,
-          karaoke: false,
-          speed: 1.0,
-          pitch: 1.0,
-          treblebass: false,
-          loudness: false,
-          mono: false,
-        },
-        Chill: {
-          bassboost: false,
-          nightcore: false,
-          vaporwave: true,
-          eightD: false,
-          karaoke: false,
-          speed: 1.0,
-          pitch: 1.0,
-          treblebass: false,
-          loudness: false,
-          mono: false,
-        },
-      },
-
-      djSettings: {
-        enabled: false,
-        djRoles: [],
-        djOnlyCommands: [
-          "skip",
-          "stop",
-          "clear",
-          "shuffle",
-          "filters",
-          "24x7",
-          "autoplay",
-        ],
-        allowedChannels: [],
-        requireSameChannel: true,
-        voteSkipEnabled: true,
-        voteSkipThreshold: 0.5,
-      },
-
       logCommands: true,
       trackUsageStats: true,
 
@@ -153,18 +70,6 @@ export class ServerConfigService {
       spotifyIntegration: false,
 
       embedColor: "#7289da",
-      customEmojis: {
-        play: "▶️",
-        pause: "⏸️",
-        stop: "⏹️",
-        skip: "⏭️",
-        previous: "⏮️",
-        repeat: "🔁",
-        shuffle: "🔀",
-        volume: "🔊",
-        queue: "📋",
-        nowplaying: "🎵",
-      },
 
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -255,15 +160,12 @@ export class ServerConfigService {
   // Get configuration statistics
   getConfigStats(): {
     totalServers: number;
-    djModeEnabled: number;
     averageQueueSize: number;
     averageVolume: number;
     mostUsedPlatform: string;
-    filterUsage: Record<string, number>;
   } {
     const configs = Array.from(this.configs.values());
 
-    const djEnabled = configs.filter((c) => c.djSettings.enabled).length;
     const avgQueueSize =
       configs.reduce((sum, c) => sum + c.maxQueueSize, 0) / configs.length;
     const avgVolume =
@@ -274,20 +176,11 @@ export class ServerConfigService {
     const mostUsedPlatform =
       platformCounts.youtube >= platformCounts.spotify ? "youtube" : "spotify";
 
-    const filterUsage: Record<string, number> = {};
-    configs.forEach((c) => {
-      Object.keys(c.filterPresets).forEach((preset) => {
-        filterUsage[preset] = (filterUsage[preset] || 0) + 1;
-      });
-    });
-
     return {
       totalServers: configs.length,
-      djModeEnabled: djEnabled,
       averageQueueSize: Math.round(avgQueueSize),
       averageVolume: Math.round(avgVolume),
       mostUsedPlatform,
-      filterUsage,
     };
   }
 

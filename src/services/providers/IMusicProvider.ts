@@ -17,7 +17,7 @@ export interface StreamInfo {
 }
 
 export enum MusicPlatform {
-  YOUTUBE = "youtube",
+  YOUTUBE = "youtube", 
   SPOTIFY = "spotify",
   SOUNDCLOUD = "soundcloud",
 }
@@ -45,4 +45,7 @@ export interface IMusicProvider {
   // Platform-specific features
   supportsPlaylists(): boolean;
   supportsDirectStreaming(): boolean;
+
+  // Load all tracks from a playlist link
+  loadPlaylistSongs(url: string, limit?: number): Promise<VideoInfo[]>;
 }

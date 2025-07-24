@@ -110,4 +110,17 @@ export class MusicProviderFactory {
     console.log("Spotify streaming not yet implemented");
     return null;
   }
+
+  async loadPlaylistSongs(url: string, limit: number = 100): Promise<VideoInfo[]> {
+    const platform = this.detectPlatform(url);
+    if (!platform) return [];
+    const provider = this.getProvider(platform);
+    if (!provider || !provider.supportsPlaylists()) return [];
+    try {
+      return await provider.loadPlaylistSongs(url, limit);
+    } catch (error) {
+      console.error(`Error loading playlist songs for ${platform}:`, error);
+      return [];
+    }
+  }
 }

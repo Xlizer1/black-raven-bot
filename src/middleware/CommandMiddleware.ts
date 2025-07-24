@@ -1,6 +1,5 @@
 import { Command } from "@sapphire/framework";
 import { MessageFlags, GuildMember } from "discord.js";
-import { DJPermissionService } from "../services/DJPermissionService";
 import { MusicQueue } from "../services/MusicQueue";
 import { logger } from "../utils/logger";
 
@@ -11,8 +10,6 @@ export interface MiddlewareResult {
 }
 
 export class CommandMiddleware {
-  private static djService = DJPermissionService.getInstance();
-
   // Main middleware check for music commands
   static async checkMusicCommand(
     interaction:
@@ -37,22 +34,7 @@ export class CommandMiddleware {
     const member = interaction.member as GuildMember;
     const queue = MusicQueue.getQueue(interaction.guild.id);
 
-    // 1. Check DJ permissions
-    const djCheck = await this.djService.checkPermissions(
-      interaction,
-      commandName
-    );
-    if (!djCheck.allowed) {
-      return {
-        allowed: false,
-        response: `❌ **${djCheck.reason}**\n\n💡 ${
-          djCheck.suggestion || "Contact an admin for help"
-        }`,
-        ephemeral: true,
-      };
-    }
-
-    // 2. Check voice channel requirements
+    // 1. Check voice channel requirements
     if (options.requireVoiceChannel && !member.voice.channelId) {
       return {
         allowed: false,
@@ -64,19 +46,15 @@ export class CommandMiddleware {
     // 3. Check same voice channel requirement
     if (options.requireSameChannel) {
       const botChannelId = queue.getConnection()?.joinConfig?.channelId;
-      const djSettings = this.djService.getSettings(interaction.guild.id);
 
-      const voiceCheck = this.djService.validateVoiceChannelAccess(
+      const voiceCheck = this.validateVoiceChannelAccess(
         member,
-        botChannelId || null,
-        djSettings
+        botChannelId || null
       );
       if (!voiceCheck.allowed) {
         return {
           allowed: false,
-          response: `❌ **${voiceCheck.reason}**\n\n💡 ${
-            voiceCheck.suggestion || ""
-          }`,
+          response: `❌ You must be in the same voice channel as the bot to use this command!`,
           ephemeral: true,
         };
       }
@@ -207,17 +185,37 @@ export class CommandMiddleware {
     voiceChannel: string | null;
     restrictions: string[];
   } {
-    const djService = this.djService;
-    const settings = djService.getSettings(member.guild.id);
-    const permissionStatus = djService.getPermissionStatus(member);
-
     return {
       isAdmin: member.permissions.has("Administrator"),
-      isDJ: permissionStatus.isDJ,
-      canControlMusic: permissionStatus.canControlMusic,
+      isDJ: false, // DJ permission removed
+      canControlMusic: false, // DJ permission removed
       voiceChannel: member.voice.channelId,
-      restrictions: permissionStatus.restrictions,
+      restrictions: [], // DJ permission removed
     };
+  }
+
+  // Helper method to validate voice channel access
+  private static validateVoiceChannelAccess(
+    member: GuildMember,
+    botChannelId: string | null
+  ): MiddlewareResult {
+    if (!member.voice.channelId) {
+      return {
+        allowed: false,
+        response: "❌ You must be in a voice channel to use this command!",
+        ephemeral: true,
+      };
+    }
+
+    if (botChannelId && member.voice.channelId !== botChannelId) {
+      return {
+        allowed: false,
+        response: `❌ You must be in the same voice channel as the bot to use this command!`,
+        ephemeral: true,
+      };
+    }
+
+    return { allowed: true };
   }
 }
 

@@ -88,6 +88,8 @@ export class PlayCommand extends Command {
 
     const query = interaction.options.getString("query", true);
 
+    logger.info(`[PlayCommand] Received query: ${query}`);
+
     await interaction.deferReply();
 
     try {
@@ -96,50 +98,85 @@ export class PlayCommand extends Command {
 
       // Handle autocomplete selection
       if (query.includes("|||")) {
+        logger.info(`[PlayCommand] Autocomplete branch entered.`);
         const autocompleteService = AutocompleteService.getInstance();
         const parsed = autocompleteService.parseAutocompleteValue(query);
+        logger.info(`[PlayCommand] Autocomplete parsed: ${JSON.stringify(parsed)}`);
 
         if (parsed) {
           // If it's a direct URL from autocomplete, use it
           if (MusicService.isUrl(parsed.url)) {
+            logger.info(`[PlayCommand] Autocomplete: Detected URL: ${parsed.url}`);
             trackInfo = await MusicService.getTrackInfo(parsed.url);
+            logger.info(`[PlayCommand] Autocomplete: Track info: ${JSON.stringify(trackInfo)}`);
           } else {
-            // Otherwise search for the specific title
+            logger.info(`[PlayCommand] Autocomplete: Searching for title: ${parsed.title}`);
             const searchResults = await MusicService.search(
               parsed.title,
               MusicPlatform.YOUTUBE,
               { limit: 1 }
             );
+            logger.info(`[PlayCommand] Autocomplete: Search results: ${JSON.stringify(searchResults)}`);
             trackInfo = searchResults[0] || null;
           }
+        } else {
+          logger.warn(`[PlayCommand] Autocomplete: Failed to parse value.`);
         }
       }
 
       // Fallback to normal processing if autocomplete parsing failed
       if (!trackInfo) {
+        logger.info(`[PlayCommand] No trackInfo from autocomplete, entering fallback path.`);
         // Check if input is a URL or text search
         if (MusicService.isUrl(query)) {
+          logger.info(`[PlayCommand] Query is a URL.`);
           // NEW: Check if it's a playlist URL
           if (this.isPlaylistUrl(query)) {
-            const platform = this.getPlaylistPlatform(query);
-            return interaction.editReply({
-              content:
-                `🎵 **${platform} Playlist Detected!**\n\n` +
-                `📋 **URL**: ${query}\n\n` +
-                `💡 **Use the playlist command instead:**\n` +
-                `\`/playlist url:${query}\`\n\n` +
-                `**Playlist command features:**\n` +
-                `• Load multiple songs at once\n` +
-                `• Shuffle option available\n` +
-                `• Set max number of songs to load\n` +
-                `• Better handling of large playlists\n\n` +
-                `⚠️ The \`/play\` command is designed for individual tracks only.`,
-            });
+            logger.info(`[PlayCommand] Detected playlist URL: ${query}`);
+            // Handle playlist links directly
+            try {
+              await interaction.editReply({ content: '⏳ Loading playlist, please wait...' });
+              const tracks = await MusicService.loadPlaylistSongs(query, 100);
+              logger.info(`[PlayCommand] Loaded ${tracks.length} tracks from playlist.`);
+              if (!tracks || tracks.length === 0) {
+                logger.warn(`[PlayCommand] Playlist load returned empty or null.`);
+                return interaction.editReply({
+                  content: '❌ Failed to load playlist or playlist is empty!'
+                });
+              }
+              // Add all tracks to queue
+              const queueItems = tracks.map(track => queue.add({
+                ...track,
+                requestedBy: interaction.user.id,
+              }));
+              logger.info(`[PlayCommand] Added ${queueItems.length} tracks to queue.`);
+              // Start playback if nothing is playing
+              if (!queue.getIsPlaying()) {
+                logger.info(`[PlayCommand] Queue is not playing, starting playback.`);
+                await this.playNext(queue, voiceChannel, interaction);
+              } else {
+                logger.info(`[PlayCommand] Queue is already playing.`);
+              }
+              return interaction.editReply({
+                content:
+                  `➕ **Added ${tracks.length} tracks from playlist to the queue!**\n` +
+                  (tracks[0] ? `🎵 **First track:** ${tracks[0].title}\n` : "") +
+                  `👤 **Requested by:** <@${interaction.user.id}>\n` +
+                  `📋 **Queue:** ${queue.size()} song${queue.size() === 1 ? '' : 's'} total`
+              });
+            } catch (error) {
+              logger.error(`[PlayCommand] Error loading playlist:`, error);
+              return interaction.editReply({
+                content: '❌ An error occurred while loading the playlist!'
+              });
+            }
           }
 
           // Continue with existing single track logic...
           const detectedPlatform = MusicService.detectPlatform(query);
+          logger.info(`[PlayCommand] Detected platform: ${detectedPlatform}`);
           if (!detectedPlatform) {
+            logger.warn(`[PlayCommand] Unsupported URL: ${query}`);
             return interaction.editReply({
               content:
                 "❌ **Unsupported URL!**\n\n" +
@@ -150,11 +187,13 @@ export class PlayCommand extends Command {
             });
           }
 
-          logger.info(`Processing ${detectedPlatform} URL: ${query}`);
+          logger.info(`[PlayCommand] Processing ${detectedPlatform} URL: ${query}`);
           trackInfo = await MusicService.getTrackInfo(query);
+          logger.info(`[PlayCommand] Track info from getTrackInfo: ${JSON.stringify(trackInfo)}`);
 
           if (!trackInfo) {
             const platformEmoji = this.getPlatformEmoji(detectedPlatform);
+            logger.warn(`[PlayCommand] Could not load content for detected platform: ${detectedPlatform}`);
             return interaction.editReply(
               `❌ **Could not load ${detectedPlatform} content!**\n\n` +
                 `${platformEmoji} **URL**: ${query}\n\n` +
@@ -168,8 +207,7 @@ export class PlayCommand extends Command {
           }
         } else {
           // Handle text search (YouTube only)
-          logger.info(`Searching YouTube for: "${query}"`);
-
+          logger.info(`[PlayCommand] Query is a text search: ${query}`);
           // Search YouTube for the text query
           const searchResults = await MusicService.search(
             query,
@@ -178,8 +216,10 @@ export class PlayCommand extends Command {
               limit: 1,
             }
           );
+          logger.info(`[PlayCommand] YouTube search results: ${JSON.stringify(searchResults)}`);
 
           if (searchResults.length === 0 || !searchResults[0]) {
+            logger.warn(`[PlayCommand] No results found on YouTube for: ${query}`);
             return interaction.editReply({
               content:
                 `❌ **No results found on YouTube!**\n\n` +
@@ -192,10 +232,12 @@ export class PlayCommand extends Command {
           }
 
           trackInfo = searchResults[0];
+          logger.info(`[PlayCommand] Using first YouTube search result: ${JSON.stringify(trackInfo)}`);
         }
       }
 
       if (!trackInfo) {
+        logger.warn(`[PlayCommand] Failed to get track information!`);
         return interaction.editReply("❌ Failed to get track information!");
       }
 
@@ -206,13 +248,6 @@ export class PlayCommand extends Command {
         ? ` (${this.formatDuration(trackInfo.duration)})`
         : "";
 
-      // Check if filters are active - FIXED: use getEnabledFilters() instead of getActiveFilters()
-      const activeFilters = queue.getEnabledFilters();
-      const filterText =
-        activeFilters.length > 0
-          ? `\n🎛️ **Active filters:** ${activeFilters.join(", ")}`
-          : "";
-
       await interaction.editReply({
         content:
           `🎵 **Detected song:**\n\n` +
@@ -220,7 +255,7 @@ export class PlayCommand extends Command {
           `🎯 **Platform:** ${
             trackInfo.platform.charAt(0).toUpperCase() +
             trackInfo.platform.slice(1)
-          }${filterText}\n\n` +
+          }\n\n` +
           `⏳ Processing...`,
       });
 
@@ -229,11 +264,14 @@ export class PlayCommand extends Command {
         ...trackInfo,
         requestedBy: interaction.user.id,
       });
+      logger.info(`[PlayCommand] Added track to queue: ${trackInfo.title}`);
 
       // If nothing is playing, start playing
       if (!queue.getIsPlaying()) {
+        logger.info(`[PlayCommand] Queue is not playing, starting playback.`);
         await this.playNext(queue, voiceChannel, interaction);
       } else {
+        logger.info(`[PlayCommand] Queue is already playing.`);
         // Just notify about queue addition
         const position = queue.size();
         const platformEmoji = this.getPlatformEmoji(trackInfo.platform);
@@ -241,6 +279,8 @@ export class PlayCommand extends Command {
           ? ` (${this.formatDuration(trackInfo.duration)})`
           : "";
         const artist = trackInfo.artist ? ` - ${trackInfo.artist}` : "";
+
+        logger.info(`[PlayCommand] Track added to queue at position ${position}`);
 
         return interaction.editReply({
           content:
@@ -254,7 +294,7 @@ export class PlayCommand extends Command {
             `👤 **Requested by:** <@${interaction.user.id}>\n\n` +
             `📋 **Queue:** ${queue.size()} song${
               queue.size() === 1 ? "" : "s"
-            } total${filterText}`,
+            } total`,
         });
       }
     } catch (error) {
@@ -323,11 +363,7 @@ export class PlayCommand extends Command {
         return this.playNext(queue, voiceChannel, interaction);
       }
 
-      // Apply filters if any are active - FIXED: Handle null return value
-      const filteredStreamUrl = await queue.applyFiltersToStream(
-        baseStreamInfo.streamUrl
-      );
-      const finalStreamUrl = filteredStreamUrl || baseStreamInfo.streamUrl; // Fallback to original if null
+      const finalStreamUrl = baseStreamInfo.streamUrl;
 
       // Join voice channel if not connected
       let connection = queue.getConnection();
@@ -379,21 +415,6 @@ export class PlayCommand extends Command {
         : "";
       const artist = currentSong.artist ? ` - ${currentSong.artist}` : "";
 
-      // Show active filters in now playing message - FIXED: use getEnabledFilters() instead of getActiveFilters()
-      const activeFilters = queue.getEnabledFilters();
-      const filterText =
-        activeFilters.length > 0
-          ? `\n🎛️ **Filters:** ${activeFilters.join(", ")}`
-          : "";
-
-      // Show queue status
-      const queueStatus = queue.getStatus();
-      const statusText = [];
-      if (queueStatus.alwaysOn) statusText.push("🔄 24/7");
-      if (queueStatus.autoPlay) statusText.push("🤖 Auto-play");
-      const modeText =
-        statusText.length > 0 ? `\n⚙️ **Modes:** ${statusText.join(", ")}` : "";
-
       return interaction.editReply({
         content:
           `${platformEmoji} **Now playing:**\n\n` +
@@ -402,7 +423,7 @@ export class PlayCommand extends Command {
             currentSong.platform.charAt(0).toUpperCase() +
             currentSong.platform.slice(1)
           }\n` +
-          `👤 **Requested by:** <@${currentSong.requestedBy}>${filterText}${modeText}` +
+          `👤 **Requested by:** <@${currentSong.requestedBy}>` +
           (queue.size() > 0
             ? `\n\n📋 **Queue:** ${queue.size()} song${
                 queue.size() === 1 ? "" : "s"

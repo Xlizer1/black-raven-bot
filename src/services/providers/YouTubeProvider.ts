@@ -16,20 +16,28 @@ export class YouTubeProvider implements IMusicProvider {
   private static readonly URL_REGEX =
     /^(https?:\/\/)?(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/)[\w-]+/;
 
+  private static readonly PLAYLIST_URL_REGEX =
+    /^(https?:\/\/)?(www\.)?(youtube\.com\/playlist\?list=)[\w-]+/;
+
   validateUrl(url: string): boolean {
-    return YouTubeProvider.URL_REGEX.test(url);
+    return (
+      YouTubeProvider.URL_REGEX.test(url) ||
+      YouTubeProvider.PLAYLIST_URL_REGEX.test(url)
+    );
   }
 
   async search(
     query: string,
     options: SearchOptions = {}
   ): Promise<VideoInfo[]> {
+    console.log(`[YouTubeProvider] search() called with query: '${query}', options: ${JSON.stringify(options)}`);
     try {
       const limit = options.limit || 1;
       const sanitizedQuery = query.replace(/[;&|`$(){}[\]\\]/g, "");
 
       // Enhanced yt-dlp command with better anti-bot protection
       const searchCommand = `yt-dlp "ytsearch${limit}:${sanitizedQuery}" --dump-json --no-download --skip-download --ignore-errors --no-warnings --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.google.com/" --extractor-retries 3`;
+      console.log(`[YouTubeProvider] Running search command: ${searchCommand}`);
 
       const { stdout } = await execAsync(searchCommand, {
         timeout: 20000, // Increased timeout
@@ -49,21 +57,23 @@ export class YouTubeProvider implements IMusicProvider {
           }
         }
       }
-
+      console.log(`[YouTubeProvider] search() returning ${results.length} results.`);
       return results;
     } catch (error) {
-      console.error("YouTube search error:", error);
+      console.error("[YouTubeProvider] YouTube search error:", error);
       return [];
     }
   }
 
   async getStreamInfo(url: string): Promise<StreamInfo | null> {
+    console.log(`[YouTubeProvider] getStreamInfo() called with url: '${url}'`);
     // First, get basic track info (this usually works even when streaming fails)
     let title = "Unknown";
     let duration: number | undefined;
 
     try {
       const infoCommand = `yt-dlp "${url}" --get-title --get-duration --no-warnings --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.google.com/"`;
+      console.log(`[YouTubeProvider] Running info command: ${infoCommand}`);
       const { stdout: infoOutput } = await execAsync(infoCommand, {
         timeout: 15000,
       });
@@ -73,7 +83,7 @@ export class YouTubeProvider implements IMusicProvider {
         duration = infoLines[1] ? this.parseDuration(infoLines[1]) : undefined;
       }
     } catch (error) {
-      console.warn("Could not get basic info, using defaults");
+      console.warn("[YouTubeProvider] Could not get basic info, using defaults");
     }
 
     // Enhanced streaming strategies with better anti-bot protection
@@ -149,20 +159,25 @@ export class YouTubeProvider implements IMusicProvider {
   }
 
   async getTrackInfo(url: string): Promise<VideoInfo | null> {
+    console.log(`[YouTubeProvider] getTrackInfo() called with url: '${url}'`);
     try {
       // Enhanced command with better anti-bot protection
       const command = `yt-dlp "${url}" --dump-json --no-download --skip-download --no-warnings --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.google.com/" --extractor-retries 2`;
+      console.log(`[YouTubeProvider] Running getTrackInfo command: ${command}`);
       const { stdout } = await execAsync(command, {
         timeout: 20000,
       });
       const data = JSON.parse(stdout.trim());
-      return this.parseVideoInfo(data);
+      const info = this.parseVideoInfo(data);
+      console.log(`[YouTubeProvider] getTrackInfo() returning: ${JSON.stringify(info)}`);
+      return info;
     } catch (error) {
-      console.warn("Full info extraction failed, trying basic info...");
+      console.warn("[YouTubeProvider] Full info extraction failed, trying basic info...");
 
       // Fallback to basic info (this usually works)
       try {
         const simpleCommand = `yt-dlp "${url}" --get-title --get-duration --get-id --no-warnings --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" --referer "https://www.google.com/"`;
+        console.log(`[YouTubeProvider] Running fallback getTrackInfo command: ${simpleCommand}`);
         const { stdout } = await execAsync(simpleCommand, {
           timeout: 15000,
         });
@@ -171,7 +186,7 @@ export class YouTubeProvider implements IMusicProvider {
         if (lines.length >= 1 && lines[0]) {
           const extractedId =
             lines.length >= 3 && lines[2] ? lines[2] : this.extractVideoId(url);
-          return {
+          const info = {
             id: extractedId,
             title: lines[0] || "Unknown",
             url: url,
@@ -184,9 +199,11 @@ export class YouTubeProvider implements IMusicProvider {
             artist: undefined,
             album: undefined,
           };
+          console.log(`[YouTubeProvider] getTrackInfo() fallback returning: ${JSON.stringify(info)}`);
+          return info;
         }
       } catch (fallbackError) {
-        console.error("Even basic track info failed:", fallbackError);
+        console.error("[YouTubeProvider] Even basic track info failed:", fallbackError);
       }
 
       return null;
@@ -199,6 +216,37 @@ export class YouTubeProvider implements IMusicProvider {
 
   supportsDirectStreaming(): boolean {
     return true;
+  }
+
+  async loadPlaylistSongs(url: string, limit: number = 100): Promise<VideoInfo[]> {
+    console.log(`[YouTubeProvider] loadPlaylistSongs() called with url: '${url}', limit: ${limit}`);
+    try {
+      // Use yt-dlp to fetch all video IDs in the playlist (new syntax)
+      const command = `yt-dlp "${url}" --flat-playlist --print "%(id)s" --playlist-end ${limit} --no-warnings`;
+      console.log(`[YouTubeProvider] Running command: ${command}`);
+      const { stdout } = await execAsync(command, {
+        timeout: 30000,
+        maxBuffer: 1024 * 1024 * 5,
+      });
+      console.log(`[YouTubeProvider] yt-dlp raw stdout:\n${stdout}`);
+      const lines = stdout.trim().split("\n");
+      console.log(`[YouTubeProvider] Parsed video IDs:`, lines);
+      const videoIds = lines.filter(id => id && /^[\w-]{11}$/.test(id));
+      const trackInfoPromises = videoIds.map(id => {
+        const videoUrl = `https://www.youtube.com/watch?v=${id}`;
+        return this.getTrackInfo(videoUrl).catch(err => {
+          console.error(`[YouTubeProvider] Error fetching info for video ID: ${id}`, err);
+          return null;
+        });
+      });
+      const infos = await Promise.all(trackInfoPromises);
+      const results = infos.filter(info => info !== null) as VideoInfo[];
+      console.log(`[YouTubeProvider] Successfully fetched ${results.length} tracks from playlist.`);
+      return results;
+    } catch (error) {
+      console.error("YouTubeProvider: Error loading playlist songs:", error);
+      return [];
+    }
   }
 
   private parseVideoInfo(data: any): VideoInfo {

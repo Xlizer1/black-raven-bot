@@ -25,6 +25,15 @@ export class MusicService {
     return this.factory.getTrackInfo(url);
   }
 
+  static async loadPlaylistSongs(url: string, limit: number = 100): Promise<VideoInfo[]> {
+    try {
+      return await this.factory.loadPlaylistSongs(url, limit);
+    } catch (error) {
+      console.error('MusicService: Error loading playlist songs:', error);
+      return [];
+    }
+  }
+
   static detectPlatform(url: string): MusicPlatform | null {
     return this.factory.detectPlatform(url);
   }
