@@ -10,6 +10,7 @@ import {
   StreamType,
 } from "@discordjs/voice";
 import { GuildMember, MessageFlags } from "discord.js";
+import type { TextBasedChannel } from "discord.js";
 import { MusicService } from "../services/MusicService";
 import { MusicQueue } from "../services/MusicQueue";
 import { AutocompleteService } from "../services/AutocompleteService";
@@ -269,6 +270,9 @@ export class PlayCommand extends Command {
       // If nothing is playing, start playing
       if (!queue.getIsPlaying()) {
         logger.info(`[PlayCommand] Queue is not playing, starting playback.`);
+        // Start playback and store the Now Playing message
+        const nowPlayingMsg = await interaction.fetchReply();
+        queue.setNowPlayingMessage(nowPlayingMsg.channelId, nowPlayingMsg.id);
         await this.playNext(queue, voiceChannel, interaction);
       } else {
         logger.info(`[PlayCommand] Queue is already playing.`);
@@ -341,6 +345,7 @@ export class PlayCommand extends Command {
     const currentSong = queue.next(); // FIXED: Remove await since next() returns QueueItem | null, not Promise
     if (!currentSong) {
       queue.setPlaying(false);
+      queue.clearNowPlayingMessage();
       return;
     }
 
@@ -415,31 +420,69 @@ export class PlayCommand extends Command {
         : "";
       const artist = currentSong.artist ? ` - ${currentSong.artist}` : "";
 
-      return interaction.editReply({
-        content:
-          `${platformEmoji} **Now playing:**\n\n` +
-          `🎵 **${currentSong.title}**${artist}${duration}\n` +
-          `🎯 **Platform:** ${
-            currentSong.platform.charAt(0).toUpperCase() +
-            currentSong.platform.slice(1)
-          }\n` +
-          `👤 **Requested by:** <@${currentSong.requestedBy}>` +
-          (queue.size() > 0
-            ? `\n\n📋 **Queue:** ${queue.size()} song${
-                queue.size() === 1 ? "" : "s"
-              } remaining`
-            : ""),
-      });
+      // Try to update the Now Playing message by ID if possible
+      const nowPlayingMsgInfo = queue.getNowPlayingMessage();
+      let updated = false;
+      if (nowPlayingMsgInfo) {
+        try {
+          const channel = await this.container.client.channels.fetch(nowPlayingMsgInfo.channelId);
+          if (channel && channel.isTextBased()) {
+            const message = await (channel as TextBasedChannel).messages.fetch(nowPlayingMsgInfo.messageId);
+            await message.edit({
+              content:
+                `${platformEmoji} **Now playing:**\n\n` +
+                `🎵 **${currentSong.title}**${artist}${duration}\n` +
+                `🎯 **Platform:** ${
+                  currentSong.platform.charAt(0).toUpperCase() +
+                  currentSong.platform.slice(1)
+                }\n` +
+                `👤 **Requested by:** <@${currentSong.requestedBy}>` +
+                (queue.size() > 0
+                  ? `\n\n📋 **Queue:** ${queue.size()} song${
+                      queue.size() === 1 ? "" : "s"
+                    } remaining`
+                  : ""),
+            });
+            updated = true;
+          }
+        } catch (err) {
+          logger.warn("Failed to update Now Playing message by ID, will fallback to interaction.editReply.", err);
+          queue.clearNowPlayingMessage();
+        }
+      }
+      if (!updated) {
+        // Fallback: try to update via interaction (may fail if token expired)
+        try {
+          await interaction.editReply({
+            content:
+              `${platformEmoji} **Now playing:**\n\n` +
+              `🎵 **${currentSong.title}**${artist}${duration}\n` +
+              `🎯 **Platform:** ${
+                currentSong.platform.charAt(0).toUpperCase() +
+                currentSong.platform.slice(1)
+              }\n` +
+              `👤 **Requested by:** <@${currentSong.requestedBy}>` +
+              (queue.size() > 0
+                ? `\n\n📋 **Queue:** ${queue.size()} song${
+                    queue.size() === 1 ? "" : "s"
+                  } remaining`
+                : ""),
+          });
+        } catch (err) {
+          logger.error("Failed to update Now Playing message via interaction.editReply.", err);
+        }
+      }
+      return;
     } catch (error) {
       logger.error("Playback error:", error);
-
       // Inform user about the error
-      await interaction.editReply({
-        content:
-          `❌ **Playback error for:** ${currentSong.title}\n\n` +
-          "Trying next song in queue...",
-      });
-
+      try {
+        await interaction.editReply({
+          content:
+            `❌ **Playback error for:** ${currentSong.title}\n\n` +
+            "Trying next song in queue...",
+        });
+      } catch {}
       return this.playNext(queue, voiceChannel, interaction);
     }
   }

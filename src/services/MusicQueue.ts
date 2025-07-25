@@ -25,6 +25,8 @@ export class MusicQueue {
   private player: AudioPlayer | null = null;
   private repeatMode: RepeatMode = RepeatMode.OFF;
   private volume: number = 1.0;
+  private nowPlayingMessageId: string | null = null;
+  private nowPlayingChannelId: string | null = null;
 
   private constructor(private guildId: string) {}
 
@@ -200,5 +202,26 @@ export class MusicQueue {
 
   getVolume(): number {
     return this.volume;
+  }
+
+  // Now Playing message tracking
+  setNowPlayingMessage(channelId: string, messageId: string): void {
+    this.nowPlayingChannelId = channelId;
+    this.nowPlayingMessageId = messageId;
+  }
+
+  clearNowPlayingMessage(): void {
+    this.nowPlayingChannelId = null;
+    this.nowPlayingMessageId = null;
+  }
+
+  getNowPlayingMessage(): { channelId: string; messageId: string } | null {
+    if (this.nowPlayingChannelId && this.nowPlayingMessageId) {
+      return {
+        channelId: this.nowPlayingChannelId,
+        messageId: this.nowPlayingMessageId,
+      };
+    }
+    return null;
   }
 }
