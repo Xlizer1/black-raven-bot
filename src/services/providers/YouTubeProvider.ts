@@ -19,6 +19,12 @@ export class YouTubeProvider implements IMusicProvider {
   private static readonly PLAYLIST_URL_REGEX =
     /^(https?:\/\/)?(www\.)?(youtube\.com\/playlist\?list=)[\w-]+/;
 
+  // Rate limiting to avoid triggering bot detection
+  private lastRequestTime = 0;
+  private requestCount = 0;
+  private readonly minRequestInterval = 2000; // 2 seconds between requests
+  private readonly maxRequestsPerMinute = 15;
+
   validateUrl(url: string): boolean {
     return (
       YouTubeProvider.URL_REGEX.test(url) ||
@@ -31,34 +37,94 @@ export class YouTubeProvider implements IMusicProvider {
     options: SearchOptions = {}
   ): Promise<VideoInfo[]> {
     console.log(`[YouTubeProvider] search() called with query: '${query}', options: ${JSON.stringify(options)}`);
+    
+    // Apply rate limiting
+    await this.applyRateLimit();
+    
     try {
       const limit = options.limit || 1;
       const sanitizedQuery = query.replace(/[;&|`$(){}[\]\\]/g, "");
 
-      // Enhanced yt-dlp command with better anti-bot protection
-      const searchCommand = `yt-dlp "ytsearch${limit}:${sanitizedQuery}" --dump-json --no-download --skip-download --ignore-errors --no-warnings --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.google.com/" --extractor-retries 3`;
-      console.log(`[YouTubeProvider] Running search command: ${searchCommand}`);
+      // Enhanced anti-bot detection strategies
+      const strategies = [
+        // Strategy 1: Use cookies and session data
+        {
+          name: "With cookies",
+          command: this.buildSearchCommand(sanitizedQuery, limit, {
+            useCookies: true,
+            useProxy: false,
+            userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          }),
+          timeout: 25000,
+        },
+        // Strategy 2: Alternative with different approach
+        {
+          name: "Alternative headers",
+          command: this.buildSearchCommand(sanitizedQuery, limit, {
+            useCookies: false,
+            useProxy: false,
+            userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+          }),
+          timeout: 20000,
+        },
+        // Strategy 3: Minimal approach
+        {
+          name: "Minimal",
+          command: this.buildSearchCommand(sanitizedQuery, limit, {
+            minimal: true,
+          }),
+          timeout: 15000,
+        },
+      ];
 
-      const { stdout } = await execAsync(searchCommand, {
-        timeout: 20000, // Increased timeout
-        maxBuffer: 1024 * 1024 * 3,
-      });
+      for (const strategy of strategies) {
+        try {
+          console.log(`🔄 Trying search strategy: ${strategy.name}`);
+          
+          const { stdout } = await execAsync(strategy.command, {
+            timeout: strategy.timeout,
+            maxBuffer: 1024 * 1024 * 3,
+          });
 
-      const lines = stdout.trim().split("\n");
-      const results: VideoInfo[] = [];
+          const lines = stdout.trim().split("\n");
+          const results: VideoInfo[] = [];
 
-      for (const line of lines) {
-        if (line.trim()) {
-          try {
-            const data = JSON.parse(line);
-            results.push(this.parseVideoInfo(data));
-          } catch (e) {
-            // Skip invalid JSON lines
+          for (const line of lines) {
+            if (line.trim()) {
+              try {
+                const data = JSON.parse(line);
+                results.push(this.parseVideoInfo(data));
+              } catch (e) {
+                // Skip invalid JSON lines
+              }
+            }
           }
+
+          if (results.length > 0) {
+            console.log(`✅ Search success with strategy: ${strategy.name}`);
+            console.log(`[YouTubeProvider] search() returning ${results.length} results.`);
+            return results;
+          }
+
+        } catch (error) {
+          console.warn(`❌ Search strategy "${strategy.name}" failed:`, error);
+          
+          // Check for specific bot detection errors
+          if (error && typeof error === "object") {
+            const execError = error as any;
+            if (execError.stderr?.includes("Sign in to confirm")) {
+              console.warn(`   → Bot detection triggered, trying next strategy...`);
+              // Add longer delay before next attempt
+              await new Promise(resolve => setTimeout(resolve, 5000));
+            }
+          }
+          continue;
         }
       }
-      console.log(`[YouTubeProvider] search() returning ${results.length} results.`);
-      return results;
+
+      console.error("[YouTubeProvider] All search strategies failed");
+      return [];
+      
     } catch (error) {
       console.error("[YouTubeProvider] YouTube search error:", error);
       return [];
@@ -67,12 +133,16 @@ export class YouTubeProvider implements IMusicProvider {
 
   async getStreamInfo(url: string): Promise<StreamInfo | null> {
     console.log(`[YouTubeProvider] getStreamInfo() called with url: '${url}'`);
+    
+    // Apply rate limiting
+    await this.applyRateLimit();
+    
     // First, get basic track info (this usually works even when streaming fails)
     let title = "Unknown";
     let duration: number | undefined;
 
     try {
-      const infoCommand = `yt-dlp "${url}" --get-title --get-duration --no-warnings --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.google.com/"`;
+      const infoCommand = this.buildInfoCommand(url);
       console.log(`[YouTubeProvider] Running info command: ${infoCommand}`);
       const { stdout: infoOutput } = await execAsync(infoCommand, {
         timeout: 15000,
@@ -88,23 +158,34 @@ export class YouTubeProvider implements IMusicProvider {
 
     // Enhanced streaming strategies with better anti-bot protection
     const strategies = [
-      // Strategy 1: Enhanced with better headers
+      // Strategy 1: With cookies and enhanced headers
       {
-        name: "Enhanced protection",
-        command: `yt-dlp "${url}" --get-url --format "bestaudio[ext=m4a]/bestaudio/best" --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.google.com/" --extractor-retries 3 --fragment-retries 3 --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" --add-header "Accept-Language:en-US,en;q=0.5" --add-header "Cache-Control:no-cache"`,
+        name: "Enhanced with cookies",
+        command: this.buildStreamCommand(url, {
+          useCookies: true,
+          format: "bestaudio[ext=m4a]/bestaudio/best",
+          userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        }),
+        timeout: 30000,
+      },
+      // Strategy 2: Alternative format
+      {
+        name: "Alternative format",
+        command: this.buildStreamCommand(url, {
+          useCookies: false,
+          format: "140/251/250/249/bestaudio/worst",
+          userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+        }),
         timeout: 25000,
       },
-      // Strategy 2: Alternative with different user agent
-      {
-        name: "Alternative user agent",
-        command: `yt-dlp "${url}" --get-url --format "140/251/250/249/bestaudio/worst" --user-agent "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.youtube.com/" --extractor-retries 2 --fragment-retries 2`,
-        timeout: 20000,
-      },
-      // Strategy 3: Fallback with minimal options
+      // Strategy 3: Minimal fallback
       {
         name: "Minimal fallback",
-        command: `yt-dlp "${url}" --get-url --format "bestaudio/worst" --no-warnings --extractor-retries 1`,
-        timeout: 15000,
+        command: this.buildStreamCommand(url, {
+          minimal: true,
+          format: "bestaudio/worst",
+        }),
+        timeout: 20000,
       },
     ];
 
@@ -136,6 +217,8 @@ export class YouTubeProvider implements IMusicProvider {
           if (execError.stderr) {
             if (execError.stderr.includes("Sign in to confirm")) {
               console.warn(`   → YouTube bot detection triggered`);
+              // Add delay before next attempt
+              await new Promise(resolve => setTimeout(resolve, 3000));
             } else if (execError.stderr.includes("403")) {
               console.warn(`   → 403 Forbidden error`);
             } else if (execError.stderr.includes("fragment")) {
@@ -160,9 +243,13 @@ export class YouTubeProvider implements IMusicProvider {
 
   async getTrackInfo(url: string): Promise<VideoInfo | null> {
     console.log(`[YouTubeProvider] getTrackInfo() called with url: '${url}'`);
+    
+    // Apply rate limiting
+    await this.applyRateLimit();
+    
     try {
       // Enhanced command with better anti-bot protection
-      const command = `yt-dlp "${url}" --dump-json --no-download --skip-download --no-warnings --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.google.com/" --extractor-retries 2`;
+      const command = this.buildTrackInfoCommand(url);
       console.log(`[YouTubeProvider] Running getTrackInfo command: ${command}`);
       const { stdout } = await execAsync(command, {
         timeout: 20000,
@@ -176,7 +263,7 @@ export class YouTubeProvider implements IMusicProvider {
 
       // Fallback to basic info (this usually works)
       try {
-        const simpleCommand = `yt-dlp "${url}" --get-title --get-duration --get-id --no-warnings --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" --referer "https://www.google.com/"`;
+        const simpleCommand = this.buildSimpleInfoCommand(url);
         console.log(`[YouTubeProvider] Running fallback getTrackInfo command: ${simpleCommand}`);
         const { stdout } = await execAsync(simpleCommand, {
           timeout: 15000,
@@ -220,33 +307,170 @@ export class YouTubeProvider implements IMusicProvider {
 
   async loadPlaylistSongs(url: string, limit: number = 100): Promise<VideoInfo[]> {
     console.log(`[YouTubeProvider] loadPlaylistSongs() called with url: '${url}', limit: ${limit}`);
+    
+    // Apply rate limiting
+    await this.applyRateLimit();
+    
     try {
-      // Use yt-dlp to fetch all video IDs in the playlist (new syntax)
-      const command = `yt-dlp "${url}" --flat-playlist --print "%(id)s" --playlist-end ${limit} --no-warnings`;
+      // Use yt-dlp to fetch all video IDs in the playlist
+      const command = this.buildPlaylistCommand(url, limit);
       console.log(`[YouTubeProvider] Running command: ${command}`);
       const { stdout } = await execAsync(command, {
-        timeout: 30000,
-        maxBuffer: 1024 * 1024 * 5,
+        timeout: 60000, // Longer timeout for playlists
+        maxBuffer: 1024 * 1024 * 10, // Larger buffer for playlists
       });
       console.log(`[YouTubeProvider] yt-dlp raw stdout:\n${stdout}`);
       const lines = stdout.trim().split("\n");
       console.log(`[YouTubeProvider] Parsed video IDs:`, lines);
       const videoIds = lines.filter(id => id && /^[\w-]{11}$/.test(id));
-      const trackInfoPromises = videoIds.map(id => {
-        const videoUrl = `https://www.youtube.com/watch?v=${id}`;
-        return this.getTrackInfo(videoUrl).catch(err => {
-          console.error(`[YouTubeProvider] Error fetching info for video ID: ${id}`, err);
-          return null;
+      
+      // Process videos in batches to avoid overwhelming the API
+      const batchSize = 5;
+      const results: VideoInfo[] = [];
+      
+      for (let i = 0; i < videoIds.length; i += batchSize) {
+        const batch = videoIds.slice(i, i + batchSize);
+        const batchPromises = batch.map(async (id) => {
+          // Add small delay between requests in batch
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          const videoUrl = `https://www.youtube.com/watch?v=${id}`;
+          return this.getTrackInfo(videoUrl).catch(err => {
+            console.error(`[YouTubeProvider] Error fetching info for video ID: ${id}`, err);
+            return null;
+          });
         });
-      });
-      const infos = await Promise.all(trackInfoPromises);
-      const results = infos.filter(info => info !== null) as VideoInfo[];
+        
+        const batchResults = await Promise.all(batchPromises);
+        results.push(...batchResults.filter(info => info !== null) as VideoInfo[]);
+        
+        // Add delay between batches
+        if (i + batchSize < videoIds.length) {
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      }
+      
       console.log(`[YouTubeProvider] Successfully fetched ${results.length} tracks from playlist.`);
       return results;
     } catch (error) {
       console.error("YouTubeProvider: Error loading playlist songs:", error);
       return [];
     }
+  }
+
+  // Private helper methods for building commands
+
+  private buildSearchCommand(query: string, limit: number, options: any = {}): string {
+    const baseCommand = `yt-dlp "ytsearch${limit}:${query}"`;
+    
+    if (options.minimal) {
+      return `${baseCommand} --dump-json --no-download --skip-download --ignore-errors --no-warnings`;
+    }
+    
+    let command = `${baseCommand} --dump-json --no-download --skip-download --ignore-errors --no-warnings`;
+    
+    if (options.userAgent) {
+      command += ` --user-agent "${options.userAgent}"`;
+    }
+    
+    if (options.useCookies) {
+      command += ` --cookies-from-browser chrome`;
+      command += ` --referer "https://www.youtube.com/"`;
+    } else {
+      command += ` --referer "https://www.google.com/"`;
+    }
+    
+    command += ` --extractor-retries 2`;
+    command += ` --fragment-retries 2`;
+    command += ` --sleep-interval 1`;
+    command += ` --max-sleep-interval 3`;
+    
+    // Add additional headers to look more like a real browser
+    command += ` --add-header "Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"`;
+    command += ` --add-header "Accept-Language:en-US,en;q=0.5"`;
+    command += ` --add-header "Cache-Control:no-cache"`;
+    command += ` --add-header "Pragma:no-cache"`;
+    
+    return command;
+  }
+
+  private buildStreamCommand(url: string, options: any = {}): string {
+    let command = `yt-dlp "${url}" --get-url`;
+    
+    if (options.format) {
+      command += ` --format "${options.format}"`;
+    }
+    
+    if (options.minimal) {
+      command += ` --no-warnings --extractor-retries 1`;
+      return command;
+    }
+    
+    if (options.userAgent) {
+      command += ` --user-agent "${options.userAgent}"`;
+    }
+    
+    if (options.useCookies) {
+      command += ` --cookies-from-browser chrome`;
+      command += ` --referer "https://www.youtube.com/"`;
+    } else {
+      command += ` --referer "https://www.google.com/"`;
+    }
+    
+    command += ` --extractor-retries 2`;
+    command += ` --fragment-retries 2`;
+    command += ` --sleep-interval 1`;
+    command += ` --max-sleep-interval 3`;
+    
+    // Add headers
+    command += ` --add-header "Accept:*/*"`;
+    command += ` --add-header "Accept-Language:en-US,en;q=0.9"`;
+    
+    return command;
+  }
+
+  private buildInfoCommand(url: string): string {
+    return `yt-dlp "${url}" --get-title --get-duration --no-warnings --user-agent "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" --referer "https://www.google.com/" --sleep-interval 1`;
+  }
+
+  private buildTrackInfoCommand(url: string): string {
+    return `yt-dlp "${url}" --dump-json --no-download --skip-download --no-warnings --user-agent "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" --referer "https://www.google.com/" --extractor-retries 2 --sleep-interval 1`;
+  }
+
+  private buildSimpleInfoCommand(url: string): string {
+    return `yt-dlp "${url}" --get-title --get-duration --get-id --no-warnings --user-agent "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36" --referer "https://www.google.com/" --sleep-interval 1`;
+  }
+
+  private buildPlaylistCommand(url: string, limit: number): string {
+    return `yt-dlp "${url}" --flat-playlist --print "%(id)s" --playlist-end ${limit} --no-warnings --sleep-interval 2 --user-agent "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"`;
+  }
+
+  // Rate limiting to avoid bot detection
+  private async applyRateLimit(): Promise<void> {
+    const now = Date.now();
+    const timeSinceLastRequest = now - this.lastRequestTime;
+    
+    // Reset request count every minute
+    if (timeSinceLastRequest > 60000) {
+      this.requestCount = 0;
+    }
+    
+    // Check if we're making too many requests
+    if (this.requestCount >= this.maxRequestsPerMinute) {
+      const waitTime = 60000 - timeSinceLastRequest;
+      console.log(`[YouTubeProvider] Rate limiting: waiting ${waitTime}ms`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+      this.requestCount = 0;
+    }
+    
+    // Ensure minimum interval between requests
+    if (timeSinceLastRequest < this.minRequestInterval) {
+      const waitTime = this.minRequestInterval - timeSinceLastRequest;
+      console.log(`[YouTubeProvider] Throttling: waiting ${waitTime}ms`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+    
+    this.lastRequestTime = Date.now();
+    this.requestCount++;
   }
 
   private parseVideoInfo(data: any): VideoInfo {
